@@ -82,7 +82,7 @@ export class CarPhysics {
     const maxSteer = this.maxSteerLow / (1 + Math.max(0, fwd) / this.steerFalloff);
     this.steerAngle = this.steerInput * maxSteer;
     const delta = this.steerAngle * Math.PI / 180;
-    let assist = ASSIST_LEVELS[Math.max(0, Math.min(2, Settings.assist))];
+    let assist = ASSIST_LEVELS[this.assistLevel ?? Math.max(0, Math.min(2, Settings.assist))];
     if (handbrake) assist *= 0.2;
 
     // 驅動 / 煞車

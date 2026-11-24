@@ -3,7 +3,8 @@
 import * as THREE from 'three';
 import { Sky } from 'three/addons/objects/Sky.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { MISTAKES, PAINTS, getTrack } from './data.js';
+import { MISTAKES, PAINTS, RIVALS, getTrack } from './data.js';
+import { Rival, DIFFICULTIES } from './rivals.js';
 import { Profile, Settings } from './store.js';
 import { Input, rumble } from './input.js';
 import { buildCar } from './carModel.js';
@@ -126,6 +127,18 @@ export class Race {
     this.camLook = new THREE.Vector3();
     this.shake = 0;
 
+    // 電腦對手
+    const diffKey = DIFFICULTIES[Settings.difficulty] ? Settings.difficulty : 'normal';
+    this.diffKey = diffKey;
+    const nOpp = Math.max(0, Math.min(5, Settings.opponents ?? 3));
+    // 衛冕冠軍只在困難出場；其餘依賽道輪替
+    const pool = RIVALS.filter((r) => diffKey === 'hard' || r.id !== 'kai');
+    const rot = def.id.length % pool.length;
+    const picks = [...pool.slice(rot), ...pool.slice(0, rot)];
+    if (diffKey === 'hard') picks.sort((a, b) => (b.id === 'kai') - (a.id === 'kai'));
+    this.rivals = picks.slice(0, nOpp).map((who, k) => new Rival(who, spec, diffKey, this.track, quality, k + 1));
+    for (const r of this.rivals) scene.add(r.model.root);
+
     this.detector = new MistakeDetector(this);
     this.accum = 0;
     this.paused = false;
@@ -148,7 +161,19 @@ export class Race {
     this.lapMistakeStart = 0; this.cleanLaps = 0; this.coins = 0;
     this.detector.resetAll();
     this.progress = this.track.startIndex;
-    this.placeCarAt(this.progress, 0);
+    // 起跑格：對手在前，玩家在最後一格
+    const n = this.rivals.length, hwG = this.track.halfWidth * 0.45;
+    const slot = (k) => ({ off: 8 + k * 5, lat: n ? (k % 2 === 0 ? -hwG : hwG) : 0 });
+    this.rivals.forEach((r, k) => {
+      const s = slot(k);
+      r.place(this.track.wrap(-s.off), s.lat);
+      r.adv = -s.off; r.finishTime = -1; r.bestLap = -1; r.lapStartT = 0; r.lapStarted = false;
+    });
+    const ps = slot(n);
+    this.progress = this.track.wrap(-ps.off);
+    this.adv = -ps.off;
+    this.position = n + 1;
+    this.placeCarAt(this.progress, ps.lat);
     this.snapCamera();
     $('finish').classList.remove('show');
     Audio.startEngine(this.spec.enginePitch);
@@ -186,9 +211,17 @@ export class Race {
     while (this.accum >= h) {
       this.car.step(h, { throttle: enabled ? throttle : 0, brake: enabled ? Input.brake : 0, handbrake: enabled && Input.handbrake, enabled });
       this.collide();
+      for (const r of this.rivals) {
+        r.car.step(h, { throttle: enabled ? r.throttle : 0, brake: enabled ? r.brake : 1, handbrake: false, enabled });
+        const { index } = this.track.findNearest(r.car.x, r.car.z, r.progress, 30);
+        r.applyRoad(index);
+        this.wallCollide(r.car, r.spec, index);
+      }
+      this.carContacts();
       this.accum -= h;
     }
     this.updateProgress();
+    this.updateRivals(dt, enabled);
     this.car.applyVisual(this.model);
     this.model.setBrake((Input.brake > 0.1 && this.car.forwardSpeed > 1) || Input.handbrake || !enabled);
     Audio.updateEngine(this.car.rpm, enabled ? throttle : 0, false);
@@ -231,11 +264,92 @@ export class Race {
     const c = this.car, t = this.track;
     let { index, sqr } = t.findNearest(c.x, c.z, this.progress, 60);
     if (sqr > 45 * 45) ({ index } = t.findNearest(c.x, c.z));
+    let dIdx = t.wrap(index - this.progress); if (dIdx > t.count / 2) dIdx -= t.count;
+    if (this.state === 'racing') this.adv += dIdx;
     this.progress = index;
     this.lateralPos = t.lateral(c.x, c.z, index);
     const abs = Math.abs(this.lateralPos);
     c.offTrack = abs > t.halfWidth + t.curbWidth;
     this.offTrack = abs > t.halfWidth + t.curbWidth + 0.2;
+  }
+
+  /** 對手：決策、進度、完賽、卡住重置；並計算即時名次 */
+  updateRivals(dt, enabled) {
+    const t = this.track, n = t.count;
+    if (!this.rivals.length) return;
+    const all = [this.car, ...this.rivals.map((r) => r.car)];
+    const prog = [this.progress, ...this.rivals.map((r) => r.progress)];
+    const info = all.map((c, k) => ({ x: c.x, z: c.z, vx: c.vx, vz: c.vz, progress: prog[k], lat: t.lateral(c.x, c.z, prog[k]) }));
+    this.rivals.forEach((r, k) => {
+      const others = info.filter((_, j) => j !== k + 1);
+      // 輕微的追趕平衡：落後玩家太多就稍微加速，領先太多就稍微放慢
+      const gap = (this.adv - r.adv) * t.spacing;
+      const rubber = this.state === 'racing' ? 1 + Math.max(r.diff.rubber[0], Math.min(r.diff.rubber[1], gap / 3000)) : 1;
+      r.think(dt, others, this.raceTime, rubber);
+      r.car.updateSteer(dt, enabled ? r.steer : 0);
+      const { index, sqr } = t.findNearest(r.car.x, r.car.z, r.progress, 60);
+      let idx = index;
+      if (sqr > 45 * 45) idx = t.findNearest(r.car.x, r.car.z).index;
+      let dIdx = t.wrap(idx - r.progress); if (dIdx > n / 2) dIdx -= n;
+      r.progress = idx;
+      r.car.offTrack = Math.abs(t.lateral(r.car.x, r.car.z, idx)) > t.halfWidth + t.curbWidth;
+      if (this.state === 'racing' && r.finishTime < 0) {
+        const lapBefore = Math.floor(r.adv / n);
+        r.adv += dIdx;
+        const lapAfter = Math.floor(r.adv / n);
+        if (lapAfter > lapBefore && lapAfter >= 1) {
+          // 跨過終點線：記錄單圈（第一次跨線是起跑，不計）
+          const lt = this.raceTime - r.lapStartT; r.lapStartT = this.raceTime;
+          if (r.lapStarted && (r.bestLap < 0 || lt < r.bestLap)) r.bestLap = lt;
+          r.lapStarted = true;
+        }
+        if (lapBefore < 0 && r.adv >= 0) { r.lapStartT = this.raceTime; r.lapStarted = true; }
+        if (r.adv >= this.totalLaps * n) r.finishTime = this.raceTime;
+        if (r.stuck > 3) { r.place(t.wrap(idx + 2), 0); }
+      }
+      r.car.applyVisual(r.model);
+      r.model.setBrake(r.brake > 0.1 || !enabled);
+    });
+    if (this.state !== 'finished') this.position = this.rankOf(this.adv);
+  }
+  rankOf(adv) {
+    let pos = 1;
+    for (const r of this.rivals) if (r.finishTime >= 0 || r.adv > adv) pos++;
+    return pos;
+  }
+
+  /** 車與車碰撞：每台車用前後兩個圓近似 */
+  carContacts() {
+    const cars = [{ c: this.car, s: this.spec, me: true }, ...this.rivals.map((r) => ({ c: r.car, s: r.spec }))];
+    if (cars.length < 2) return;
+    const circles = (o) => {
+      const c = o.c, r = o.s.maxHalfWidth * 0.92, off = Math.max(0, o.s.length / 2 - r);
+      return [[c.x + c.fx * off, c.z + c.fz * off, r], [c.x - c.fx * off, c.z - c.fz * off, r]];
+    };
+    for (let a = 0; a < cars.length; a++) for (let b = a + 1; b < cars.length; b++) {
+      const A = cars[a], B = cars[b];
+      if ((A.c.x - B.c.x) ** 2 + (A.c.z - B.c.z) ** 2 > 64) continue;
+      let best = null;
+      for (const p of circles(A)) for (const q of circles(B)) {
+        const dx = q[0] - p[0], dz = q[1] - p[1], d = Math.hypot(dx, dz), min = p[2] + q[2];
+        if (d < min && d > 1e-4 && (!best || min - d > best.pen)) best = { nx: dx / d, nz: dz / d, pen: min - d };
+      }
+      if (!best) continue;
+      const { nx, nz, pen } = best;
+      A.c.x -= nx * pen / 2; A.c.z -= nz * pen / 2;
+      B.c.x += nx * pen / 2; B.c.z += nz * pen / 2;
+      const vrel = (B.c.vx - A.c.vx) * nx + (B.c.vz - A.c.vz) * nz;
+      if (vrel >= 0) continue;
+      const j = -vrel * 0.6;
+      A.c.vx -= nx * j; A.c.vz -= nz * j;
+      B.c.vx += nx * j; B.c.vz += nz * j;
+      A.c.r *= 0.8; B.c.r *= 0.8;
+      if (A.me && this.state === 'racing') {
+        if (j > 1.5) Audio.impact(Math.min(1, j / 8));
+        // 只有玩家撞上前車（接觸點在車頭方向）才算失誤；被後車撞不算
+        if (nx * A.c.fx + nz * A.c.fz > 0.5) this.detector.onCollision(j * 2);
+      }
+    }
   }
 
   applyRoad(index) {
@@ -248,11 +362,18 @@ export class Race {
     const c = this.car, t = this.track;
     const { index } = t.findNearest(c.x, c.z, this.progress, 30);
     this.applyRoad(index);
+    const dv = this.wallCollide(c, this.spec, index);
+    if (dv > 1.5) Audio.impact(Math.min(1, dv / 10));
+    if (dv > 0) this.detector.onCollision(dv);
+  }
+  /** 護欄 / 柱子碰撞（玩家與對手共用），回傳撞擊速度變化 */
+  wallCollide(c, spec, index) {
+    const t = this.track;
     const lat = t.lateral(c.x, c.z, index);
     const r = t.rights[index];
-    const hw = this.spec.maxHalfWidth * 0.95;
+    const hw = spec.maxHalfWidth * 0.95;
     // 車身兩端（前後）都要檢查，用車長的一半估算車頭方向在側向的延伸
-    const ext = Math.abs(Math.sin(c.h - Math.atan2(t.tangents[index].x, t.tangents[index].z))) * this.spec.length * 0.5;
+    const ext = Math.abs(Math.sin(c.h - Math.atan2(t.tangents[index].x, t.tangents[index].z))) * spec.length * 0.5;
     const reach = hw + ext * 0.9;
     let dv = 0;
     if (lat + reach > t.rightBarrier[index]) dv = c.collide(-r.x, -r.z, lat + reach - t.rightBarrier[index]);
@@ -261,8 +382,7 @@ export class Race {
       const dx = c.x - o.x, dz = c.z - o.z, d = Math.hypot(dx, dz), min = o.r + hw;
       if (d < min && d > 1e-3) dv = Math.max(dv, c.collide(dx / d, dz / d, min - d));
     }
-    if (dv > 1.5) Audio.impact(Math.min(1, dv / 10));
-    if (dv > 0) this.detector.onCollision(dv);
+    return dv;
   }
 
   inZone(cp) { return this.track.wrap(this.progress - this.track.checkpoints[cp]) <= this.track.checkpointZone; }
@@ -309,23 +429,45 @@ export class Race {
   }
   finish() {
     this.state = 'finished';
+    const total = this.raceTime + this.penalty;
+    // 最終名次：已完賽的對手依時間排，其餘依進度
+    const rows = [{ name: '你', me: true, time: total, adv: Infinity, car: this.spec.name }];
+    for (const r of this.rivals) rows.push({ name: r.name, title: r.who.title, time: r.finishTime, adv: r.adv, car: r.spec.name });
+    rows.sort((a, b) => {
+      const fa = a.time >= 0, fb = b.time >= 0;
+      if (fa && fb) return a.time - b.time;
+      if (fa !== fb) return fa ? -1 : 1;
+      return b.adv - a.adv;
+    });
+    const rank = rows.findIndex((r) => r.me) + 1;
+    this.position = rank;
+    const hasOpp = this.rivals.length > 0;
+    const diff = DIFFICULTIES[this.diffKey];
+    const placeMul = hasOpp ? [1.6, 1.25, 1.0, 0.85, 0.75, 0.7][rank - 1] : 1;
     let coins = 400 + 150 * this.totalLaps + 250 * this.cleanLaps + (this.detector.total === 0 ? 500 : 0);
-    coins = Math.round(coins * (this.trackDef.reward || 1) / 10) * 10;
+    coins = Math.round(coins * (this.trackDef.reward || 1) * placeMul * (hasOpp ? diff.reward : 1) / 10) * 10;
+    const win = hasOpp && rank === 1 && Profile.recordWin(this.trackDef.id, this.diffKey);
+    this.rank = rank;
     if (Profile.vip) coins *= 2;
     const record = this.bestLap > 0 && Profile.recordLap(this.trackDef.id, this.bestLap);
     this.coins = coins;
     Profile.addCoins(coins);
     const d = this.detector;
     const mis = Object.keys(MISTAKES).filter((k) => d.counts[k]).map((k) => `${MISTAKES[k].name} ×${d.counts[k]}`).join('　');
+    const medal = ['🥇', '🥈', '🥉'];
+    const table = hasOpp ? `<div class="ranking">${rows.map((r, i) => `<div class="rk${r.me ? ' me' : ''}"><b>${medal[i] || (i + 1)}</b><span>${r.name}${r.title ? `<small>${r.title}</small>` : ''}</span><em>${r.time >= 0 ? formatTime(r.time) : '未完賽'}</em></div>`).join('')}</div>` : '';
     const html = `
-      <div class="total">${formatTime(this.raceTime + this.penalty)}</div>
+      ${hasOpp ? `<div class="place">${rank === 1 ? '冠軍！' : `第 ${rank} 名`}<small>${diff.name}・${this.rivals.length} 位對手</small></div>` : ''}
+      ${win ? '<div style="color:#ffd24d"><b>🏆 取得這條賽道的勝利紀錄！</b></div>' : ''}
+      ${table}
+      <div class="total">${formatTime(total)}</div>
       ${this.penalty > 0 ? `<div style="color:#c99bff">（含罰時 +${this.penalty.toFixed(1)} 秒）</div>` : ''}
       <div>最佳單圈　${formatTime(this.bestLap)}${record ? '　<b style="color:#ffd24d">賽道新紀錄！</b>' : ''}</div>
       <div class="dim" style="font-size:13px">${this.trackDef.name}　·　賽道紀錄 ${formatTime(Profile.bestLap(this.trackDef.id))}</div>
       <div class="dim" style="font-size:13px">${this.lapTimes.map((t, i) => `第 ${i + 1} 圈 ${formatTime(t)}`).join('　')}</div>
       <div style="margin-top:6px"><b>失誤統計：共 ${d.total} 次</b></div>
       <div style="font-size:13px">${mis || '<span style="color:#3ee07f">零失誤，完美駕駛！</span>'}</div>
-      <div class="reward"><span class="coin"></span>獲得金幣 +${coins.toLocaleString()}${this.trackDef.reward > 1 ? `（山路 ×${this.trackDef.reward}）` : ''}${Profile.vip ? '（VIP ×2）' : ''}</div>
+      <div class="reward"><span class="coin"></span>獲得金幣 +${coins.toLocaleString()}${this.trackDef.reward > 1 ? `（賽道 ×${this.trackDef.reward}）` : ''}${hasOpp ? `（名次 ×${placeMul}・${diff.name} ×${diff.reward}）` : ''}${Profile.vip ? '（VIP ×2）' : ''}</div>
       <div class="dim" style="font-size:13px">無失誤圈 ${this.cleanLaps} / ${this.totalLaps}　·　目前金幣 ${Profile.coins.toLocaleString()}</div>`;
     this.hooks.onFinish(html);
   }
@@ -391,6 +533,7 @@ export class Race {
     Audio.stopEngine();
     this.track.dispose();
     this.model.dispose();
+    for (const r of this.rivals) r.model.dispose();
     this.envMap.dispose();
     this.scene.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material && o.material.dispose) o.material.dispose(); });
   }

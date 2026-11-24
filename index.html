@@ -35,9 +35,35 @@
     <p>請將手機轉為橫向遊玩</p>
   </div>
 
+  <!-- 聯賽園區（主畫面世界） -->
+  <div id="hub" class="layer">
+    <header class="topbar">
+      <div class="title">聯賽園區<small id="hubSub">DAWNBAY SPEED LEAGUE</small></div>
+      <div class="spacer"></div>
+      <div class="coins"><span class="coin"></span><b id="hCoins">0</b></div>
+      <div class="trophy" id="hTrophy">🏆 0/6</div>
+      <button class="iconbtn nav" id="hShopBtn" title="商店">🛒<span>商店</span></button>
+      <button class="iconbtn nav" id="hSetBtn" title="設定">⚙<span>設定</span></button>
+      <button class="iconbtn" id="hFullBtn" title="全螢幕">⛶</button>
+    </header>
+    <div id="joyArea" class="joyArea"><div id="joyBase" class="joyBase"><i id="joyKnob"></i></div><span>拖曳移動</span></div>
+    <button id="hAct" class="actBtn">互動</button>
+    <div class="hubHint" id="hubHint"></div>
+  </div>
+
+  <!-- 劇情對話 -->
+  <div id="talk" class="layer modal talk">
+    <div class="talkBox">
+      <div class="who" id="tkWho"></div>
+      <div class="text" id="tkText"></div>
+      <div class="opts" id="tkOpts"></div>
+    </div>
+  </div>
+
   <!-- 車庫 -->
   <div id="garage" class="layer">
     <header class="topbar">
+      <button class="iconbtn nav" id="gBack" title="返回園區">‹<span>園區</span></button>
       <div class="title">車庫<small>GARAGE</small></div>
       <div class="spacer"></div>
       <div class="coins"><span class="coin"></span><b id="gCoins">0</b></div>
@@ -66,12 +92,13 @@
         <button class="primary nav" id="gAction">開始比賽</button>
       </div>
     </footer>
-    <div class="hint pad-only">LB/RB 換車　十字鍵 ↑↓ 換色　A 確認　Y 商店　Start 設定</div>
+    <div class="hint pad-only">LB/RB 換車　十字鍵 ↑↓ 換色　A 確認　Y 商店　B 返回園區　Start 設定</div>
   </div>
 
   <!-- 比賽 HUD -->
   <div id="hud" class="layer">
     <div class="panel tl">
+      <div id="hPos" class="posBig"></div>
       <div id="hLap">圈數 1/3</div>
       <div id="hTime" class="big">00:00.000</div>
       <div id="hBest" class="dim">最佳 --:--.---</div>
@@ -122,7 +149,7 @@
       <h2>完賽！</h2>
       <div id="fBody"></div>
       <div class="row">
-        <button class="secondary nav" id="fGarage">返回車庫</button>
+        <button class="secondary nav" id="fGarage">返回園區</button>
         <button class="primary nav" id="fAgain">再跑一次</button>
       </div>
     </div>
@@ -155,6 +182,8 @@
       <div class="sub" id="tCar"></div>
       <div class="list" id="tList"></div>
       <div class="row">
+        <button class="secondary nav" id="tDiff">難度：普通</button>
+        <button class="secondary nav" id="tOpp">對手：3 人</button>
         <button class="secondary nav" id="tLaps">圈數：3 圈</button>
         <button class="secondary nav" id="tClose">返回</button>
       </div>

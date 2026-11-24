@@ -290,6 +290,15 @@ export const TRACKS = [
     ],
   },
 ];
+// 聯賽對手（原創角色）
+export const RIVALS = [
+  { id: 'kai', name: '凱', title: '衛冕冠軍「黑豹」', car: 'nordvind', paint: 3 },
+  { id: 'erica', name: '艾莉卡', title: '海岸線女王', car: 'vento', paint: 0 },
+  { id: 'jin', name: '迅', title: '山道職人', car: 'furia', paint: 1 },
+  { id: 'mona', name: '莫娜', title: '電動車工程師', car: 'volta', paint: 6 },
+  { id: 'rei', name: '雷', title: '沙漠極速狂', car: 'vortex', paint: 4 },
+  { id: 'aoi', name: '小葵', title: '新人同期', car: 'tempesta', paint: 5 },
+];
 export const getTrack = (id) => TRACKS.find((t) => t.id === id) || TRACKS[0];
 
 // 商店商品（測試模式：不會實際扣款）

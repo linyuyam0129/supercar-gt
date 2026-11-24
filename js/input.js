@@ -11,7 +11,7 @@ addEventListener('keydown', (e) => {
 addEventListener('keyup', (e) => keys.delete(e.code));
 addEventListener('blur', () => keys.clear());
 
-const touch = { left: false, right: false, gas: false, brake: false, hand: false, dragSteer: 0 };
+const touch = { left: false, right: false, gas: false, brake: false, hand: false, dragSteer: 0, joyX: 0, joyY: 0, lookDX: 0 };
 let tilt = 0;
 let tiltEnabled = false;
 
@@ -20,6 +20,7 @@ let padPressed = new Set();
 
 export const Input = {
   steer: 0, throttle: 0, brake: 0, handbrake: false,
+  moveX: 0, moveY: 0, lookX: 0, interact: false,
   usingGamepad: false, usingTouch: matchMedia('(pointer: coarse)').matches,
   padName: '',
   // 單次觸發
@@ -66,6 +67,20 @@ export const Input = {
     this.brake = brk;
     this.handbrake = hand;
 
+    // 走路（園區）：WASD / 方向鍵 / 左搖桿 / 觸控搖桿；鏡頭：右搖桿 / Q E / 滑動
+    let mvx = (k('KeyD', 'ArrowRight') ? 1 : 0) - (k('KeyA', 'ArrowLeft') ? 1 : 0) + touch.joyX;
+    let mvy = (k('KeyW', 'ArrowUp') ? 1 : 0) - (k('KeyS', 'ArrowDown') ? 1 : 0) + touch.joyY;
+    let lk = ((k('KeyE') ? 1 : 0) - (k('KeyQ') ? 1 : 0)) * 0.035 + touch.lookDX;
+    touch.lookDX = 0;
+    if (pad) {
+      const dz2 = 0.18, ax = pad.axes[0] || 0, ay = pad.axes[1] || 0, rx = pad.axes[2] || 0;
+      if (Math.hypot(ax, ay) > dz2) { mvx += ax; mvy -= ay; }
+      if (Math.abs(rx) > dz2) lk += rx * 0.045;
+    }
+    const ml = Math.hypot(mvx, mvy);
+    if (ml > 1) { mvx /= ml; mvy /= ml; }
+    this.moveX = mvx; this.moveY = mvy; this.lookX = lk;
+
     this.reset = kp('KeyR') || pp(3);
     this.north = kp('KeyT', 'KeyY') || pp(3);
     this.camera = kp('KeyC') || pp(5);
@@ -81,6 +96,7 @@ export const Input = {
     this.left = kp('ArrowLeft', 'KeyA') || pp(14);
     this.right = kp('ArrowRight', 'KeyD') || pp(15);
     this.confirm = kp('Enter', 'Space') || pp(0);
+    this.interact = kp('Enter', 'Space', 'KeyF') || pp(0);
     this.back = kp('Escape', 'Backspace') || pp(1);
     pressedKeys.clear();
   },
@@ -128,6 +144,44 @@ export function bindDragSteer(area, knob) {
   };
   area.addEventListener('pointerup', end);
   area.addEventListener('pointercancel', end);
+}
+
+/** 園區虛擬搖桿：在區域內按下的位置當中心 */
+export function bindJoystick(area, base, knob) {
+  let id = null, cx = 0, cy = 0;
+  const R = 56;
+  area.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    id = e.pointerId; area.setPointerCapture(id);
+    const r = area.getBoundingClientRect();
+    cx = e.clientX; cy = e.clientY;
+    base.style.left = `${cx - r.left}px`; base.style.top = `${cy - r.top}px`;
+    base.classList.add('active');
+    Input.usingTouch = true; Input.usingGamepad = false;
+  });
+  area.addEventListener('pointermove', (e) => {
+    if (e.pointerId !== id) return;
+    let dx = e.clientX - cx, dy = e.clientY - cy;
+    const l = Math.hypot(dx, dy);
+    if (l > R) { dx *= R / l; dy *= R / l; }
+    touch.joyX = dx / R; touch.joyY = -dy / R;
+    knob.style.transform = `translate(${dx}px, ${dy}px)`;
+  });
+  const end = (e) => {
+    if (e.pointerId !== id) return;
+    id = null; touch.joyX = 0; touch.joyY = 0; knob.style.transform = ''; base.classList.remove('active');
+  };
+  area.addEventListener('pointerup', end);
+  area.addEventListener('pointercancel', end);
+}
+/** 在畫面空白處左右拖曳 → 旋轉鏡頭 */
+export function bindLookDrag(el) {
+  let id = null, lx = 0;
+  el.addEventListener('pointerdown', (e) => { if (id !== null) return; id = e.pointerId; lx = e.clientX; });
+  addEventListener('pointermove', (e) => { if (e.pointerId !== id) return; touch.lookDX += (e.clientX - lx) * 0.006; lx = e.clientX; });
+  const end = (e) => { if (e.pointerId === id) id = null; };
+  addEventListener('pointerup', end);
+  addEventListener('pointercancel', end);
 }
 
 /** 重力感應：iOS 需要在使用者點擊時請求權限 */

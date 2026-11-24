@@ -2,11 +2,14 @@
 import * as THREE from 'three';
 import { CARS, PAINTS, PAINT_NAMES, PRODUCTS, MISTAKES, TRACKS } from './data.js';
 import { Profile, Settings, onChange, presetName, cyclePreset, buyProduct, SimulatedProvider } from './store.js';
-import { Input, bindTouchButton, bindDragSteer, enableTilt, stopRumble } from './input.js';
+import { Input, bindTouchButton, bindDragSteer, bindJoystick, bindLookDrag, enableTilt, stopRumble } from './input.js';
 import { unlockAudio } from './audio.js';
 import { ASSIST_NAMES } from './carPhysics.js';
 import { Garage } from './garage.js';
 import { Race, CAMERA_NAMES, formatTime, raiseAlert } from './race.js';
+import { Hub } from './hub.js';
+import { DIFFICULTIES, DIFF_KEYS } from './rivals.js';
+import { INTRO, talkTo, speakerName, speakerColor, winStats } from './story.js';
 
 const $ = (id) => document.getElementById(id);
 const show = (id, on = true) => $(id).classList.toggle('show', on);
@@ -46,8 +49,8 @@ addEventListener('orientationchange', () => setTimeout(resize, 200));
 resize();
 
 // ---------------- 狀態 ----------------
-let mode = null; // 'garage' | 'race'
-let garage = null, race = null;
+let mode = null; // 'hub' | 'garage' | 'race'
+let garage = null, race = null, hub = null;
 const modalStack = []; // 開啟中的對話層（最上層在最後）
 let navIndex = 0;
 
@@ -55,7 +58,33 @@ function setLoading(p, text) {
   $('loadBar').style.width = `${Math.round(p * 100)}%`;
   if (text) $('loadText').textContent = text;
 }
-const nextFrame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+// 讓載入畫面先畫出來；分頁在背景時 rAF 不會觸發，所以加上計時器保底
+const nextFrame = () => new Promise((r) => { let done = false; const f = () => { if (!done) { done = true; setTimeout(r, 0); } }; requestAnimationFrame(f); setTimeout(f, 120); });
+
+async function enterHub() {
+  show('loading'); setLoading(0.2, '前往聯賽園區…');
+  await nextFrame();
+  disposeAll();
+  hub = new Hub(renderer, camera, quality);
+  mode = 'hub';
+  setLoading(1);
+  show('hud', false); show('finish', false); show('garage', false);
+  show('hub');
+  refreshHub();
+  show('loading', false);
+  if (!Profile.flag('intro')) {
+    setTimeout(() => talk(INTRO, [{ label: '出發吧！', act: null }], () => {
+      Profile.setFlag('intro');
+      toast(Input.usingTouch ? '用左下拖曳走動，靠近發光圈按「互動」' : 'WASD 走動、Q/E 轉鏡頭，靠近發光圈按 Enter 互動', 4200);
+    }), 600);
+  }
+}
+function refreshHub() {
+  if (!hub) return;
+  $('hCoins').textContent = Profile.coins.toLocaleString();
+  const st = winStats();
+  $('hTrophy').textContent = `🏆 ${st.wins}/${st.total}`;
+}
 
 async function enterGarage() {
   show('loading'); setLoading(0.2, '準備車庫…');
@@ -64,7 +93,7 @@ async function enterGarage() {
   garage = new Garage(renderer, camera, quality);
   mode = 'garage';
   setLoading(1);
-  show('hud', false); show('finish', false);
+  show('hud', false); show('finish', false); show('hub', false);
   show('garage');
   refreshGarage();
   show('loading', false);
@@ -73,7 +102,7 @@ async function enterGarage() {
 async function enterRace() {
   unlockAudio();
   if (Settings.steerMode === 'tilt') await enableTilt();
-  show('garage', false);
+  show('garage', false); show('hub', false);
   show('loading'); setLoading(0.15, `建造賽道與地形…（${TRACKS.find((t) => t.id === Settings.track)?.name || ''}）`);
   await nextFrame();
   disposeAll();
@@ -90,6 +119,7 @@ async function enterRace() {
 function disposeAll() {
   closeAllModals();
   if (garage) { garage.dispose(); garage = null; }
+  if (hub) { hub.dispose(); hub = null; }
   if (race) { race.dispose(); race = null; }
   renderer.renderLists.dispose();
 }
@@ -139,6 +169,7 @@ function garageAction() {
     if (Profile.tryBuy(c)) { toast(`已購買 ${c.name}！`); refreshGarage(); }
   });
 }
+$('gBack').onclick = () => enterHub();
 $('gPrev').onclick = () => changeCar(-1);
 $('gNext').onclick = () => changeCar(1);
 $('gAction').onclick = garageAction;
@@ -151,7 +182,7 @@ $('gSwatches').addEventListener('click', (e) => {
   garage.setPaint(+b.dataset.paint);
   refreshGarage();
 });
-onChange(() => { if (mode === 'garage') refreshGarage(); $('sCoins').textContent = Profile.coins.toLocaleString(); });
+onChange(() => { if (mode === 'garage') refreshGarage(); if (mode === 'hub') refreshHub(); $('sCoins').textContent = Profile.coins.toLocaleString(); });
 
 function toggleFullscreen() {
   const d = document.documentElement;
@@ -189,17 +220,25 @@ $('sClose').onclick = () => closeModal('shop');
 // ---------------- 選擇賽道 ----------------
 const TIME_NAMES = { day: '白天', night: '夜間', autumn: '秋季午後', dusk: '黃昏', snow: '雪天', desert: '沙漠正午' };
 const LAPS = [1, 2, 3, 5];
+const OPPS = [0, 1, 3, 5];
+const WIN_NAMES = ['尚未獲勝', '簡單 勝利', '普通 勝利', '困難 勝利'];
+function refreshTrackOpts() {
+  $('tLaps').textContent = `圈數：${Settings.laps} 圈`;
+  $('tDiff').textContent = `難度：${(DIFFICULTIES[Settings.difficulty] || DIFFICULTIES.normal).name}`;
+  $('tOpp').textContent = Settings.opponents ? `對手：${Settings.opponents} 人` : '對手：無（計時賽）';
+  $('tDiff').disabled = !Settings.opponents;
+}
 function openTracks() {
   const c = Profile.selectedCar();
   $('tCar').textContent = `使用車輛：${c.name}`;
-  $('tLaps').textContent = `圈數：${Settings.laps} 圈`;
+  refreshTrackOpts();
   $('tList').innerHTML = TRACKS.map((t) => {
     const best = Profile.bestLap(t.id);
     const stars = '★'.repeat(t.difficulty) + '☆'.repeat(3 - t.difficulty);
     return `<button class="item product nav${t.id === Settings.track ? ' sel' : ''}" data-track="${t.id}">
       <span class="lbl">${t.name}<span class="badge">${t.type === 'mountain' ? '山路' : '賽道'}</span><span class="badge alt">${TIME_NAMES[t.time]}</span>
         <span class="pdesc">${t.desc}</span>
-        <span class="pdesc">難度 <b class="stars">${stars}</b>　金幣 ×${t.reward}　最佳單圈 ${formatTime(best)}</span></span>
+        <span class="pdesc">難度 <b class="stars">${stars}</b>　金幣 ×${t.reward}　最佳單圈 ${formatTime(best)}　${Profile.winLevel(t.id) ? '🏆 ' : ''}${WIN_NAMES[Profile.winLevel(t.id)]}</span></span>
       <span class="val">出發</span></button>`;
   }).join('');
   openModal('tracks');
@@ -213,8 +252,71 @@ $('tList').addEventListener('click', (e) => {
   closeModal('tracks');
   enterRace();
 });
-$('tLaps').onclick = () => { Settings.laps = LAPS[(LAPS.indexOf(Settings.laps) + 1) % LAPS.length]; $('tLaps').textContent = `圈數：${Settings.laps} 圈`; };
+$('tLaps').onclick = () => { Settings.laps = LAPS[(LAPS.indexOf(Settings.laps) + 1) % LAPS.length]; refreshTrackOpts(); };
+$('tDiff').onclick = () => { Settings.difficulty = DIFF_KEYS[(DIFF_KEYS.indexOf(Settings.difficulty) + 1) % DIFF_KEYS.length]; refreshTrackOpts(); };
+$('tOpp').onclick = () => { Settings.opponents = OPPS[(OPPS.indexOf(Settings.opponents) + 1) % OPPS.length]; refreshTrackOpts(); };
 $('tClose').onclick = () => closeModal('tracks');
+
+// ---------------- 劇情對話 ----------------
+let talkQ = [], talkActs = [], talkCb = null, typeTimer = 0, typeFull = '', typing = false;
+function talk(lines, actions = [], cb = null) {
+  talkQ = [...lines]; talkActs = actions; talkCb = cb;
+  openModal('talk');
+  nextLine();
+}
+function nextLine() {
+  const l = talkQ.shift();
+  if (!l) return;
+  $('tkWho').textContent = speakerName(l.who);
+  $('tkWho').style.color = speakerColor(l.who);
+  typeFull = l.text; typing = true;
+  let i = 0;
+  const el = $('tkText'); el.textContent = '';
+  clearInterval(typeTimer);
+  typeTimer = setInterval(() => { i += 2; el.textContent = typeFull.slice(0, i); if (i >= typeFull.length) { clearInterval(typeTimer); typing = false; } }, 28);
+  const last = talkQ.length === 0;
+  const acts = last ? (talkActs.length ? talkActs : [{ label: '關閉', act: null }]) : [{ label: '▶ 繼續', act: '__next' }];
+  $('tkOpts').innerHTML = acts.map((a, k) => `<button class="nav${k === 0 ? ' primary' : ''}" data-act="${a.act ?? ''}">${a.label}</button>`).join('');
+  navIndex = 0; updateNavFocus();
+}
+function finishTyping() { clearInterval(typeTimer); typing = false; $('tkText').textContent = typeFull; }
+$('tkOpts').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-act]');
+  if (!b) return;
+  e.stopPropagation();
+  if (typing) { finishTyping(); return; }
+  const act = b.dataset.act;
+  if (act === '__next') { nextLine(); return; }
+  closeModal('talk');
+  const cb = talkCb; talkCb = null;
+  if (cb) cb(act);
+  doAction(act);
+});
+$('talk').addEventListener('click', (e) => {
+  if (e.target.closest('[data-act]')) return;
+  if (typing) finishTyping();
+  else if (talkQ.length) nextLine();
+});
+function doAction(act) {
+  if (act === 'garage') enterGarage();
+  else if (act === 'tracks') openTracks();
+  else if (act === 'shop') openShop();
+}
+/** 園區互動點 */
+function hubInteract(spot) {
+  if (!spot) return;
+  if (spot.id === 'garage') { enterGarage(); return; }
+  if (spot.id === 'shop') { openShop(); return; }
+  const who = spot.npc || spot.id;
+  const t = talkTo(who);
+  talk(t.lines, t.actions);
+}
+$('hAct').onclick = () => hub && hubInteract(hub.near);
+$('hShopBtn').onclick = openShop;
+$('hSetBtn').onclick = () => openMenu(false);
+$('hFullBtn').onclick = toggleFullscreen;
+bindJoystick($('joyArea'), $('joyBase'), $('joyKnob'));
+bindLookDrag(canvas);
 
 // ---------------- 對話框 ----------------
 let dialogYes = null;
@@ -253,12 +355,12 @@ function menuRows(inRace) {
   if (!inRace) {
     rows.push({ l: '圈數', v: () => ({ text: `${Settings.laps} 圈` }), f: (d) => { const L = [1, 2, 3, 5]; Settings.laps = L[(L.indexOf(Settings.laps) + d + L.length) % L.length]; } });
     rows.push({ l: '畫質（重新載入後生效）', v: () => ({ text: label(QUALITIES, Settings.quality) }), f: (d) => { Settings.quality = cycle(QUALITIES, Settings.quality, d); } });
-    rows.push({ l: '重設遊戲進度', danger: true, v: () => ({ text: '' }), f: () => confirmDialog('確定要清除金幣、車輛與設定？', () => { Profile.reset(); refreshGarage(); renderMenu(); toast('已重設'); }) });
+    rows.push({ l: '重設遊戲進度', danger: true, v: () => ({ text: '' }), f: () => confirmDialog('確定要清除金幣、車輛、戰績與設定？', () => { Profile.reset(); closeAllModals(); enterHub(); toast('已重設'); }) });
     rows.push({ l: '關閉', v: () => ({ text: '' }), f: () => closeModal('menu') });
   } else {
     rows.push({ l: '繼續比賽', v: () => ({ text: '' }), f: () => closeModal('menu') });
     rows.push({ l: '重新開始', v: () => ({ text: '' }), f: () => { closeModal('menu'); race.restart(); } });
-    rows.push({ l: '返回車庫', v: () => ({ text: '' }), f: () => { closeModal('menu'); enterGarage(); } });
+    rows.push({ l: '返回園區', v: () => ({ text: '' }), f: () => { closeModal('menu'); enterHub(); } });
   }
   return rows;
 }
@@ -303,7 +405,7 @@ function closeModal(id) {
 function closeAllModals() { [...modalStack].forEach(closeModal); }
 function navItems() {
   const top = modalStack[modalStack.length - 1];
-  const root = top ? $(top) : mode === 'garage' ? $('garage') : mode === 'race' && race?.state === 'finished' ? $('finish') : null;
+  const root = top ? $(top) : mode === 'garage' ? $('garage') : mode === 'hub' ? $('hub') : mode === 'race' && race?.state === 'finished' ? $('finish') : null;
   if (!root) return [];
   return [...root.querySelectorAll('.nav')].filter((e) => e.offsetParent !== null);
 }
@@ -330,7 +432,7 @@ function handleMenuInput() {
   }
   if (Input.confirm && items[navIndex]) items[navIndex].click();
   if (Input.back || (top === 'menu' && Input.pause)) {
-    if (top === 'dialog') $('dNo').click(); else closeModal(top);
+    if (top === 'dialog') $('dNo').click(); else if (top !== 'talk') closeModal(top);
   }
   return true;
 }
@@ -345,6 +447,23 @@ function handleGarageInput() {
   if (Input.confirm) garageAction();
   if (Input.north) openShop();
   if (Input.pause) openMenu(false);
+  if (Input.back) enterHub();
+}
+
+function handleHubInput() {
+  if (Input.interact && hub.near) hubInteract(hub.near);
+  if (Input.north) openShop();
+  if (Input.pause) openMenu(false);
+}
+const NEAR_TEXT = (s) => s.prompt;
+function updateHubHud() {
+  const near = hub.near;
+  const b = $('hAct');
+  b.classList.toggle('show', !!near);
+  if (near) b.textContent = (Input.usingGamepad ? 'Ⓐ ' : '') + NEAR_TEXT(near);
+  $('hubHint').textContent = Input.usingGamepad
+    ? '左搖桿 移動　右搖桿 鏡頭　A 互動　Y 商店　Start 設定'
+    : `WASD 移動　Q / E 轉鏡頭　Enter / F 互動${near ? `（${near.prompt}）` : ''}　Esc 設定`;
 }
 
 function handleRaceInput() {
@@ -365,7 +484,7 @@ function onFinish(html) {
   setTimeout(() => { if (race && race.state === 'finished') { show('finish'); updateNavFocus(); } }, 900);
 }
 $('fAgain').onclick = () => { show('finish', false); race.restart(); };
-$('fGarage').onclick = () => { show('finish', false); enterGarage(); };
+$('fGarage').onclick = () => { show('finish', false); enterHub(); };
 $('hPause').onclick = () => openMenu(true);
 $('hCam').onclick = () => { Settings.camera = (Settings.camera + 1) % 3; hudToast('視角：' + CAMERA_NAMES[Settings.camera]); };
 $('hReset').onclick = () => race && race.resetCar();
@@ -406,6 +525,7 @@ bindDragSteer($('dragArea'), $('dragKnob'));
 const lightEls = [...document.querySelectorAll('#lights i')];
 function updateHud() {
   const r = race;
+  $('hPos').innerHTML = r.rivals.length ? `${r.position}<small>/ ${r.rivals.length + 1} 名</small>` : '';
   $('hLap').textContent = `圈數 ${Math.min(r.lap, r.totalLaps)}/${r.totalLaps}`;
   $('hTime').textContent = formatTime(r.state === 'racing' ? r.lapTime : r.state === 'countdown' ? 0 : r.raceTime + r.penalty);
   $('hBest').textContent = `最佳 ${formatTime(r.bestLap)}`;
@@ -443,10 +563,15 @@ function loop(now) {
 
   const menuOpen = modalStack.length > 0;
   if (menuOpen) handleMenuInput();
+  else if (mode === 'hub' && hub) handleHubInput();
   else if (mode === 'garage') handleGarageInput();
   else if (mode === 'race' && race) handleRaceInput();
 
-  if (mode === 'garage' && garage) {
+  if (mode === 'hub' && hub) {
+    const still = menuOpen || !document.body.contains(canvas);
+    hub.update(dt, still ? { x: 0, y: 0 } : { x: Input.moveX, y: Input.moveY }, still ? 0 : Input.lookX);
+    updateHubHud();
+  } else if (mode === 'garage' && garage) {
     const pad = Input.pad();
     const lookX = pad ? (Math.abs(pad.axes[2] || 0) > 0.15 ? pad.axes[2] : 0) : 0;
     garage.update(dt, lookX);
@@ -465,6 +590,6 @@ window.addEventListener('gamepadconnected', (e) => toast(`控制器已連線：$
 window.addEventListener('gamepaddisconnected', () => { toast('控制器已中斷連線'); if (mode === 'race' && race && !modalStack.length) openMenu(true); });
 
 // 除錯用：在瀏覽器主控台可用 __game 存取目前狀態
-window.__game = { get garage() { return garage; }, get race() { return race; }, camera, renderer };
+window.__game = { get garage() { return garage; }, get race() { return race; }, get hub() { return hub; }, enterGarage, enterHub, camera, renderer };
 
-enterGarage().then(() => requestAnimationFrame(loop));
+enterHub().then(() => requestAnimationFrame(loop));

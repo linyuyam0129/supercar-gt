@@ -24,9 +24,11 @@ function ensure() {
   def('paints', {});
   def('settings', {});
   def('best', {});
+  def('wins', {});
+  def('story', {});
   const s = state.settings;
   const d = { vibration: true, vibrationStrength: 1, voice: true, voiceVolume: 1, visual: true,
-    assist: 2, steerMode: 'buttons', autoThrottle: false, camera: 0, quality: 'auto', laps: 3, track: 'circuit' };
+    assist: 2, steerMode: 'buttons', autoThrottle: false, camera: 0, quality: 'auto', laps: 3, track: 'circuit', difficulty: 'normal', opponents: 3 };
   for (const k in d) if (s[k] === undefined) s[k] = d[k];
 }
 ensure();
@@ -55,6 +57,17 @@ export const Profile = {
   bestLap(trackId) { const b = state.best[trackId]; return b === undefined ? -1 : b; },
   /** 回傳是否刷新紀錄 */
   recordLap(trackId, t) { const b = this.bestLap(trackId); if (b < 0 || t < b) { state.best[trackId] = t; save(); return true; } return false; },
+  /** 勝利紀錄：每條賽道記下贏過的最高難度（1 簡單 / 2 普通 / 3 困難）；回傳是否刷新 */
+  recordWin(trackId, diffKey) {
+    const lv = { easy: 1, normal: 2, hard: 3 }[diffKey] || 1;
+    if ((state.wins[trackId] || 0) >= lv) return false;
+    state.wins[trackId] = lv; save(); return true;
+  },
+  winLevel(trackId) { return state.wins[trackId] || 0; },
+  winCount(minLv = 1) { return Object.values(state.wins).filter((v) => v >= minLv).length; },
+  /** 劇情旗標（看過的對話等） */
+  flag(k) { return !!state.story[k]; },
+  setFlag(k, v = true) { state.story[k] = v; save(); },
   ownedCount() { return CARS.filter((c) => this.owns(c.id)).length; },
 };
 
