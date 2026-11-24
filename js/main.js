@@ -1,6 +1,6 @@
 // 進入點：渲染器、畫面流程（車庫 ↔ 比賽）、設定選單、課金商店、對話框與控制器選單導覽
 import * as THREE from 'three';
-import { CARS, PAINTS, PAINT_NAMES, PRODUCTS, MISTAKES } from './data.js';
+import { CARS, PAINTS, PAINT_NAMES, PRODUCTS, MISTAKES, TRACKS } from './data.js';
 import { Profile, Settings, onChange, presetName, cyclePreset, buyProduct, SimulatedProvider } from './store.js';
 import { Input, bindTouchButton, bindDragSteer, enableTilt, stopRumble } from './input.js';
 import { unlockAudio } from './audio.js';
@@ -74,7 +74,7 @@ async function enterRace() {
   unlockAudio();
   if (Settings.steerMode === 'tilt') await enableTilt();
   show('garage', false);
-  show('loading'); setLoading(0.15, '建造賽道與地形…');
+  show('loading'); setLoading(0.15, `建造賽道與地形…（${TRACKS.find((t) => t.id === Settings.track)?.name || ''}）`);
   await nextFrame();
   disposeAll();
   setLoading(0.5, '整備賽車…');
@@ -133,7 +133,7 @@ function refreshGarage() {
 function changeCar(d) { garage.show(garage.index + d); refreshGarage(); }
 function garageAction() {
   const c = garage.car;
-  if (Profile.owns(c.id)) { Profile.select(c.id); enterRace(); return; }
+  if (Profile.owns(c.id)) { Profile.select(c.id); openTracks(); return; }
   if (Profile.coins < c.price) { openShop(); toast(`還差 ${(c.price - Profile.coins).toLocaleString()} 金幣`); return; }
   confirmDialog(`以 <span class="coin"></span><b>${c.price.toLocaleString()}</b> 購買<br><b>${c.name}</b>？`, () => {
     if (Profile.tryBuy(c)) { toast(`已購買 ${c.name}！`); refreshGarage(); }
@@ -185,6 +185,36 @@ $('sList').addEventListener('click', (e) => {
   });
 });
 $('sClose').onclick = () => closeModal('shop');
+
+// ---------------- 選擇賽道 ----------------
+const TIME_NAMES = { day: '白天', night: '夜間', autumn: '秋季午後' };
+const LAPS = [1, 2, 3, 5];
+function openTracks() {
+  const c = Profile.selectedCar();
+  $('tCar').textContent = `使用車輛：${c.name}`;
+  $('tLaps').textContent = `圈數：${Settings.laps} 圈`;
+  $('tList').innerHTML = TRACKS.map((t) => {
+    const best = Profile.bestLap(t.id);
+    const stars = '★'.repeat(t.difficulty) + '☆'.repeat(3 - t.difficulty);
+    return `<button class="item product nav${t.id === Settings.track ? ' sel' : ''}" data-track="${t.id}">
+      <span class="lbl">${t.name}<span class="badge">${t.type === 'mountain' ? '山路' : '賽道'}</span><span class="badge alt">${TIME_NAMES[t.time]}</span>
+        <span class="pdesc">${t.desc}</span>
+        <span class="pdesc">難度 <b class="stars">${stars}</b>　金幣 ×${t.reward}　最佳單圈 ${formatTime(best)}</span></span>
+      <span class="val">出發</span></button>`;
+  }).join('');
+  openModal('tracks');
+  navIndex = Math.max(0, TRACKS.findIndex((t) => t.id === Settings.track));
+  updateNavFocus();
+}
+$('tList').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-track]');
+  if (!b) return;
+  Settings.track = b.dataset.track;
+  closeModal('tracks');
+  enterRace();
+});
+$('tLaps').onclick = () => { Settings.laps = LAPS[(LAPS.indexOf(Settings.laps) + 1) % LAPS.length]; $('tLaps').textContent = `圈數：${Settings.laps} 圈`; };
+$('tClose').onclick = () => closeModal('tracks');
 
 // ---------------- 對話框 ----------------
 let dialogYes = null;
@@ -433,5 +463,8 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) { sto
 
 window.addEventListener('gamepadconnected', (e) => toast(`控制器已連線：${e.gamepad.id.replace(/\(.*?\)/g, '').trim()}`));
 window.addEventListener('gamepaddisconnected', () => { toast('控制器已中斷連線'); if (mode === 'race' && race && !modalStack.length) openMenu(true); });
+
+// 除錯用：在瀏覽器主控台可用 __game 存取目前狀態
+window.__game = { get garage() { return garage; }, get race() { return race; }, camera, renderer };
 
 enterGarage().then(() => requestAnimationFrame(loop));

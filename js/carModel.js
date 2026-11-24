@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 export const REST_DROP = 0.4;
-const BODY_RINGS = 120, BODY_VERTS = 48;
+const BODY_RINGS = 140, BODY_VERTS = 64;
 const CABIN_RINGS = 64, CABIN_VERTS = 40;
 
 const clamp01 = (x) => Math.max(0, Math.min(1, x));
@@ -54,7 +54,7 @@ export function loft(rings, capStart, capEnd, classes = 1, classify = null) {
     const ci = start + m;
     for (let j = 0; j < m; j++) {
       const a = start + j, b = start + (j + 1) % m;
-      if (end) tris.push(a, b, ci); else tris.push(a, ci, b);
+      if (end) tris.push(a, ci, b); else tris.push(a, b, ci); // 與側面同向，整體翻轉時才會一起翻
     }
   };
   if (capStart) cap(rings[0], false);
@@ -157,20 +157,45 @@ export const trackHalf = (s, front) => {
 
 // ---------------- 車身 ----------------
 const bulgeAt = (s, z) => gauss(z - s.frontAxleZ, 0.5) * s.fenderBulgeFront + gauss(z - s.rearAxleZ, 0.55) * s.fenderBulgeRear;
-function archY(s, z) {
-  let best = -1;
-  const ra = s.wheelRadius + 0.05;
+/** 輪拱半徑：不能高過該處引擎蓋 / 葉子板，否則會在上方開洞 */
+function archR(s, az) {
+  const top = smooth(s.bodyZ, s.bodyTop, az) + (az > 0 ? s.fenderBulgeFront : s.fenderBulgeRear) * 0.5;
+  return Math.max(s.wheelRadius + 0.02, Math.min(s.wheelRadius + 0.05, top - 0.05 - s.wheelRadius));
+}
+/** 輪拱：把落在輪拱圓內的車身側面頂點推到圓周上（上半圓）或兩側（下半），得到平滑的輪拱邊緣 */
+function carveArch(s, p, xr, sinT) {
+  if (xr <= 0.55 || sinT > 0.85) return p; // 只處理側面與底部
+  const cy = s.wheelRadius;
   for (const az of [s.frontAxleZ, s.rearAxleZ]) {
-    const dz = z - az;
-    if (Math.abs(dz) < ra) best = Math.max(best, s.wheelRadius + Math.sqrt(ra * ra - dz * dz));
+    const ra = archR(s, az);
+    const dz = p[2] - az, dy = p[1] - cy;
+    if (dy >= 0) {
+      const d = Math.hypot(dz, dy);
+      if (d < ra) {
+        if (d < 1e-5) return [p[0], cy + ra, az];
+        return [p[0], cy + dy / d * ra, az + dz / d * ra];
+      }
+    } else if (Math.abs(dz) < ra) {
+      return [p[0], p[1], az + (dz >= 0 ? ra : -ra)];
+    }
   }
-  return best;
+  return p;
+}
+/** 面中心是否位於輪拱內壁（用位置判斷，邊界才會平滑） */
+function inArch(s, c) {
+  const cy = s.wheelRadius;
+  for (const az of [s.frontAxleZ, s.rearAxleZ]) {
+    const ra = archR(s, az) + 0.006;
+    const dz = c.z - az, dy = c.y - cy;
+    if (dy >= 0 ? dz * dz + dy * dy <= ra * ra : Math.abs(dz) <= ra) return true;
+  }
+  return false;
 }
 function bodyRing(s, z, m) {
   const hw = smooth(s.bodyZ, s.bodyHalfWidth, z);
   const yb = smooth(s.bodyZ, s.bodyBottom, z), yt = smooth(s.bodyZ, s.bodyTop, z);
   const yc = (yb + yt) / 2, h = (yt - yb) / 2, e = 2 / s.bodyRoundness;
-  const bulge = bulgeAt(s, z), arch = archY(s, z);
+  const bulge = bulgeAt(s, z);
   const ring = [];
   for (let j = 0; j < m; j++) {
     const t = -Math.PI / 2 + j / m * Math.PI * 2;
@@ -180,7 +205,23 @@ function bodyRing(s, z, m) {
     x *= lerp(1, s.bodyTaper, k * k);
     const xr = Math.abs(x) / hw;
     if (y > yc) y += bulge * sstep(0.35, 0.8, xr) * clamp01((y - yc) / h * 1.5);
-    if (arch > 0 && xr > 0.55 && y < arch) y = arch;
+    ring.push(carveArch(s, [x, y, z], xr, Math.sin(t)));
+  }
+  return ring;
+}
+function bodyRingRaw(s, z, m) { // 不含輪拱，用來量測車身表面
+  const hw = smooth(s.bodyZ, s.bodyHalfWidth, z);
+  const yb = smooth(s.bodyZ, s.bodyBottom, z), yt = smooth(s.bodyZ, s.bodyTop, z);
+  const yc = (yb + yt) / 2, h = (yt - yb) / 2, e = 2 / s.bodyRoundness;
+  const bulge = bulgeAt(s, z);
+  const ring = [];
+  for (let j = 0; j < m; j++) {
+    const t = -Math.PI / 2 + j / m * Math.PI * 2;
+    let x = hw * spow(Math.cos(t), e);
+    let y = yc + h * spow(Math.sin(t), e);
+    const k = clamp01((y - yb) / (yt - yb));
+    x *= lerp(1, s.bodyTaper, k * k);
+    if (y > yc) y += bulge * sstep(0.35, 0.8, Math.abs(x) / hw) * clamp01((y - yc) / h * 1.5);
     ring.push([x, y, z]);
   }
   return ring;
@@ -189,49 +230,92 @@ function buildBody(s) {
   const rings = [];
   for (let i = 0; i < BODY_RINGS; i++) rings.push(bodyRing(s, lerp(s.rearZ, s.frontZ, i / (BODY_RINGS - 1)), BODY_VERTS));
   return loft(rings, true, true, 2, (c, n) => {
-    if (n.y < -0.35) return 1;
-    if (Math.abs(n.x) > 0.3 && Math.sign(n.x) !== Math.sign(c.x) && n.y < 0.2) return 1;
+    if (n.y < -0.35 && c.y < 0.45) return 1;   // 底盤
+    if (inArch(s, c)) return 1;                 // 輪拱內壁
     return 0;
   });
 }
 const bodyTopC = (s, z) => smooth(s.bodyZ, s.bodyTop, z);
+function cabinPoint(s, z, t) {
+  const e = 2 / s.cabinRoundness;
+  const hw = smooth(s.cabinZ, s.cabinHalfWidth, z);
+  const baseY = bodyTopC(s, z) - 0.12;
+  const top = Math.max(smooth(s.cabinZ, s.cabinTop, z), baseY + 0.03);
+  const yc = (baseY + top) / 2, h = (top - baseY) / 2;
+  let x = hw * spow(Math.cos(t), e);
+  const y = yc + h * spow(Math.sin(t), e);
+  const k = clamp01((y - baseY) / (top - baseY));
+  x *= lerp(1, s.cabinTaper, Math.pow(k, 1.2));
+  return [x, y, z, yc];
+}
 function buildCabin(s) {
   const z0 = s.cabinZ[0], z1 = s.cabinZ[s.cabinZ.length - 1];
-  const e = 2 / s.cabinRoundness;
   const rings = [];
   for (let i = 0; i < CABIN_RINGS; i++) {
     const z = lerp(z0, z1, i / (CABIN_RINGS - 1));
-    const hw = smooth(s.cabinZ, s.cabinHalfWidth, z);
-    const baseY = bodyTopC(s, z) - 0.12;
-    const top = Math.max(smooth(s.cabinZ, s.cabinTop, z), baseY + 0.03);
-    const yc = (baseY + top) / 2, h = (top - baseY) / 2;
     const ring = [];
-    for (let j = 0; j < CABIN_VERTS; j++) {
-      const t = -Math.PI / 2 + j / CABIN_VERTS * Math.PI * 2;
-      let x = hw * spow(Math.cos(t), e);
-      const y = yc + h * spow(Math.sin(t), e);
-      const k = clamp01((y - baseY) / (top - baseY));
-      x *= lerp(1, s.cabinTaper, Math.pow(k, 1.2));
-      ring.push([x, y, z]);
-    }
+    for (let j = 0; j < CABIN_VERTS; j++) ring.push(cabinPoint(s, z, -Math.PI / 2 + j / CABIN_VERTS * Math.PI * 2).slice(0, 3));
     rings.push(ring);
   }
-  return loft(rings, true, true, 2, (c, n) => {
-    const baseY = bodyTopC(s, c.z) - 0.12;
-    if (c.y < baseY + 0.14) return 0;
-    const ax = Math.abs(n.x);
-    if (c.z > s.windshieldTopZ) {
-      if (ax < 0.5 && n.y > -0.2) return 1;
-      if (ax > 0.72 && c.z < z1 - 0.15) return 1;
-      return 0;
+  return loft(rings, true, true)[0];
+}
+/** 車窗：在座艙表面上以 (z, 角度) 參數取一塊曲面並向外微移，邊界平滑；低於腰線的部分會被車身遮住 */
+function glassPatch(s, zA, zB, tA, tB, nz = 28, nt = 18) {
+  if (zB - zA < 0.05) return null;
+  const pos = [], idx = [];
+  const off = 0.008, eps = 1e-3;
+  const P = (z, t) => cabinPoint(s, z, t);
+  const rc = Math.min(0.1, (zB - zA) * 0.3);
+  for (let i = 0; i <= nz; i++) {
+    const z = lerp(zA, zB, i / nz);
+    const u = Math.min(z - zA, zB - z) / rc;
+    const shrink = u < 1 ? 0.14 * (1 - Math.sqrt(1 - (1 - u) * (1 - u))) : 0;
+    const a = tA + shrink, b = Math.max(a, tB - shrink);
+    for (let j = 0; j <= nt; j++) {
+      const t = lerp(a, b, j / nt);
+      const p = P(z, t);
+      const dz = P(z + eps, t), dz2 = P(z - eps, t), dt = P(z, t + eps), dt2 = P(z, t - eps);
+      const A = new THREE.Vector3(dz[0] - dz2[0], dz[1] - dz2[1], dz[2] - dz2[2]);
+      const B = new THREE.Vector3(dt[0] - dt2[0], dt[1] - dt2[1], dt[2] - dt2[2]);
+      const n = A.cross(B).normalize();
+      if (n.x * p[0] + n.y * (p[1] - p[3]) < 0) n.negate();
+      pos.push(p[0] + n.x * off, p[1] + n.y * off, p[2] + n.z * off);
     }
-    if (c.z > s.sideGlassRearZ && ax > 0.6 && n.y < 0.6) return 1;
-    if (c.z < s.rearGlassZ && n.y > 0.25 && ax < 0.5) return 1;
-    return 0;
-  });
+  }
+  const w = nt + 1;
+  for (let i = 0; i < nz; i++) for (let j = 0; j < nt; j++) {
+    const a = i * w + j, b = a + 1, c = a + w, d = c + 1;
+    idx.push(a, c, b, b, c, d);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(pos.length / 3 * 2), 2));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  // 讓法線朝外
+  const nrm = g.getAttribute('normal');
+  const mid = Math.floor(pos.length / 6);
+  const p = new THREE.Vector3().fromArray(pos, mid * 3);
+  const yc = cabinPoint(s, p.z, Math.PI / 2)[3];
+  if (nrm.getX(mid) * p.x + nrm.getY(mid) * (p.y - yc) < 0) {
+    for (let k = 0; k < idx.length; k += 3) { const t = idx[k + 1]; idx[k + 1] = idx[k + 2]; idx[k + 2] = t; }
+    g.setIndex(idx); g.computeVertexNormals();
+  }
+  return g;
+}
+function buildGlass(s) {
+  const z0 = s.cabinZ[0], z1 = s.cabinZ[s.cabinZ.length - 1];
+  const out = [];
+  const PI = Math.PI;
+  out.push(glassPatch(s, s.windshieldTopZ, z1 - 0.02, 1.18, PI - 1.18));
+  const zr = Math.max(z0 + 0.05, s.sideGlassRearZ), zf = z1 - 0.1;
+  out.push(glassPatch(s, zr, zf, 0.04, 0.8));
+  out.push(glassPatch(s, zr, zf, PI - 0.8, PI - 0.04));
+  if (s.rearGlassZ > z0 + 0.1) out.push(glassPatch(s, z0 + 0.03, s.rearGlassZ, 1.05, PI - 1.05));
+  return out.filter(Boolean);
 }
 function topY(s, z, xAbs) {
-  const ring = bodyRing(s, z, 96);
+  const ring = bodyRingRaw(s, z, 96);
   const yc = (smooth(s.bodyZ, s.bodyBottom, z) + smooth(s.bodyZ, s.bodyTop, z)) / 2;
   let best = smooth(s.bodyZ, s.bodyTop, z), bd = 1e9;
   for (const p of ring) {
@@ -242,7 +326,7 @@ function topY(s, z, xAbs) {
   return best;
 }
 function sideX(s, z, y) {
-  const ring = bodyRing(s, z, 96);
+  const ring = bodyRingRaw(s, z, 96);
   let best = 0, bd = 1e9;
   for (const p of ring) {
     if (p[0] < 0) continue;
@@ -266,6 +350,7 @@ function materials(s, paint) {
     rim: new THREE.MeshStandardMaterial({ color: col(s.rimColor), roughness: 0.25, metalness: 0.95 }),
     disc: new THREE.MeshStandardMaterial({ color: col([0.42, 0.42, 0.43]), roughness: 0.45, metalness: 0.9 }),
     caliper: new THREE.MeshStandardMaterial({ color: col(s.caliperColor), roughness: 0.4, metalness: 0.2 }),
+    amber: new THREE.MeshStandardMaterial({ color: col([0.9, 0.45, 0.05]), emissive: new THREE.Color(0.5, 0.2, 0), roughness: 0.2 }),
   };
 }
 
@@ -279,16 +364,38 @@ export function buildCar(s, paint, { shadows = true } = {}) {
   const col_ = new Collector();
 
   const [bPaint, bTrim] = buildBody(s);
-  const [cPaint, cGlass] = buildCabin(s);
-  col_.add(body, bPaint, M.paint); col_.add(body, bTrim, M.trim);
-  col_.add(body, cPaint, M.paint); col_.add(body, cGlass, M.glass);
+  // 雙色車身：用著色器依高度切換顏色，分界線才會俐落（不受網格三角形影響）
+  let bodyPaint = M.paint;
+  if (s.twoTone) {
+    bodyPaint = M.paint.clone();
+    const lower = { value: col(s.twoTone) }, cut = { value: s.twoToneY };
+    bodyPaint.onBeforeCompile = (sh) => {
+      sh.uniforms.uLower = lower; sh.uniforms.uCut = cut;
+      sh.vertexShader = 'varying float vLocalY;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvLocalY = position.y;');
+      sh.fragmentShader = 'uniform vec3 uLower;\nuniform float uCut;\nvarying float vLocalY;\n' + sh.fragmentShader.replace('#include <color_fragment>',
+        '#include <color_fragment>\nfloat tt = smoothstep(uCut - 0.003, uCut + 0.003, vLocalY);\ndiffuseColor.rgb = mix(uLower, diffuseColor.rgb, tt);\nfloat pin = 1.0 - smoothstep(0.004, 0.008, abs(vLocalY - uCut - 0.012));\ndiffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.5, 0.5, 0.52), pin * 0.6);');
+    };
+    bodyPaint.customProgramCacheKey = () => 'twoTone';
+    M.body = bodyPaint;
+  }
+  col_.add(body, bPaint, bodyPaint); col_.add(body, bTrim, M.trim);
+  col_.add(body, buildCabin(s), M.paint);
+  for (const g of buildGlass(s)) col_.add(body, g, M.glass);
 
   const P = (type, pos, scale, mat, rot, group = body) => col_.add(group, UNIT[type], mat, trs(pos, scale, rot));
   const fz = s.frontZ, rz = s.rearZ;
 
   // 頭燈
   for (const side of [-1, 1]) {
-    if (s.headLights === 'slim') {
+    if (s.headLights === 'popup') {
+      // 掀起式頭燈（升起狀態）
+      const z = fz - 0.46;
+      const x = smooth(s.bodyZ, s.bodyHalfWidth, z) * 0.6;
+      const y = topY(s, z, x);
+      P('cube', [side * x, y + 0.045, z], [0.4, 0.13, 0.25], M.paint);
+      P('cube', [side * x, y + 0.05, z + 0.127], [0.37, 0.115, 0.01], M.trim);
+      P('cube', [side * x, y + 0.05, z + 0.133], [0.33, 0.085, 0.01], M.head);
+    } else if (s.headLights === 'slim') {
       const z = fz - 0.34;
       const x = smooth(s.bodyZ, s.bodyHalfWidth, z) * 0.62;
       const y = topY(s, z, x);
@@ -304,8 +411,18 @@ export function buildCar(s, paint, { shadows = true } = {}) {
       P('sphere', [side * x, y - 0.045, z + 0.03], [0.2, 0.13, 0.22], M.head);
     }
   }
+  // 復古車：黑色保桿、方向燈、水箱罩
+  if (s.retro) {
+    const zf = fz - 0.1, zr = rz + 0.1;
+    const hf = smooth(s.bodyZ, s.bodyHalfWidth, zf), hr = smooth(s.bodyZ, s.bodyHalfWidth, zr);
+    const yf = smooth(s.bodyZ, s.bodyBottom, zf), yr = smooth(s.bodyZ, s.bodyBottom, zr);
+    P('cube', [0, yf + 0.11, zf + 0.04], [hf * 2.04, 0.15, 0.24], M.trim);
+    P('cube', [0, yr + 0.1, zr - 0.04], [hr * 2.06, 0.15, 0.24], M.trim);
+    P('cube', [0, yf + 0.25, fz - 0.02], [hf * 0.9, 0.04, 0.06], M.trim);
+    for (const side of [-1, 1]) P('cube', [side * hf * 0.7, yf + 0.12, zf + 0.165], [0.2, 0.06, 0.01], M.amber);
+  }
   // 前保桿進氣 / 下擾流
-  {
+  if (!s.retro) {
     const z = fz - 0.08;
     const hw = smooth(s.bodyZ, s.bodyHalfWidth, z), yb = smooth(s.bodyZ, s.bodyBottom, z);
     P('sphere', [0, yb + 0.1, z], [hw * 1.1, 0.13, 0.16], M.trim);
@@ -322,7 +439,7 @@ export function buildCar(s, paint, { shadows = true } = {}) {
     for (const side of [-1, 1]) P('sphere', [side * (x - 0.015), y, z], [0.07, 0.24, 0.62], M.trim, [0, side * 6, side * -4]);
   }
   // 側裙
-  {
+  if (!s.retro) {
     const zm = (s.frontAxleZ + s.rearAxleZ) / 2;
     const yb = smooth(s.bodyZ, s.bodyBottom, zm);
     const x = sideX(s, zm, yb + 0.06);
@@ -354,18 +471,26 @@ export function buildCar(s, paint, { shadows = true } = {}) {
       } else if (s.tailLights === 'roundSingle') {
         P('cyl', [side * hw * 0.5, y, rz - 0.005], [0.2, 0.02, 0.2], M.chrome, axisZ);
         P('cyl', [side * hw * 0.5, y, rz - 0.02], [0.16, 0.02, 0.16], M.tail, axisZ);
-      } else {
+      } else if (s.tailLights === 'bar') {
         P('sphere', [side * hw * 0.42, y, rz + 0.01], [hw * 0.62, 0.06, 0.06], M.tail);
       }
     }
     if (s.tailLights === 'bar') P('cube', [0, y, rz + 0.005], [hw * 0.5, 0.012, 0.02], M.tail);
-    const dz = rz + 0.18;
-    const dyb = smooth(s.bodyZ, s.bodyBottom, dz);
-    const dw = smooth(s.bodyZ, s.bodyHalfWidth, dz) * 1.45;
-    P('cube', [0, dyb + 0.05, dz], [dw, 0.14, 0.38], M.carbon);
-    for (let f = -2; f <= 2; f++) P('cube', [f * dw * 0.18, dyb + 0.03, dz - 0.04], [0.018, 0.16, 0.4], M.carbon);
-    const ey = yb + 0.08;
-    const xs = s.exhaustCount >= 4 ? [-0.42, -0.28, 0.28, 0.42] : [-0.3, 0.3];
+    if (s.tailLights === 'band') {
+      // 橫貫車尾的寬版尾燈
+      P('cube', [0, y - 0.03, rz - 0.004], [hw * 1.76, 0.15, 0.03], M.trim);
+      for (const side of [-1, 1]) P('cube', [side * hw * 0.5, y - 0.03, rz - 0.012], [hw * 0.68, 0.11, 0.03], M.tail);
+      for (const side of [-1, 1]) P('cube', [side * hw * 0.11, y - 0.03, rz - 0.012], [hw * 0.12, 0.11, 0.03], M.amber);
+    }
+    if (!s.retro) {
+      const dz = rz + 0.18;
+      const dyb = smooth(s.bodyZ, s.bodyBottom, dz);
+      const dw = smooth(s.bodyZ, s.bodyHalfWidth, dz) * 1.45;
+      P('cube', [0, dyb + 0.07, dz], [dw, 0.1, 0.38], M.carbon);
+      for (let f = -2; f <= 2; f++) P('cube', [f * dw * 0.18, dyb + 0.06, dz - 0.03], [0.018, 0.1, 0.4], M.carbon);
+    }
+    const ey = s.retro ? yb - 0.03 : yb + 0.08;
+    const xs = s.exhaustCount >= 4 ? [-0.42, -0.28, 0.28, 0.42] : s.exhaustCount === 1 ? [-0.55] : [-0.3, 0.3];
     for (const ex of xs) {
       P('cyl', [ex * hw, ey, rz - 0.03], [0.1, 0.07, 0.1], M.chrome, axisZ);
       P('cyl', [ex * hw, ey, rz - 0.075], [0.075, 0.03, 0.075], M.trim, axisZ);
@@ -445,7 +570,7 @@ export function buildCar(s, paint, { shadows = true } = {}) {
   return {
     root, body, pivots, spinners, anchors,
     brake: M.tail, paint: M.paint,
-    setPaint(c) { M.paint.color.copy(col(c)); },
+    setPaint(c) { M.paint.color.copy(col(c)); if (M.body) M.body.color.copy(M.paint.color); },
     setBrake(on) { M.tail.emissive.setRGB(on ? 6 : 0.9, on ? 0.12 : 0.02, on ? 0.1 : 0.02); },
     dispose() {
       root.traverse((o) => { if (o.isMesh) o.geometry.dispose(); });

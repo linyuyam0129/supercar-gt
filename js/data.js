@@ -12,6 +12,7 @@ const base = {
   rearGlassZ: -99, headLights: 'slim', tailLights: 'roundDouble', rims: 'fiveSpoke',
   rimColor: [0.78, 0.78, 0.8], caliperColor: [0.95, 0.75, 0.05], exhaustCount: 2,
   sideIntake: false, sideIntakeZ: 0, wing: false, wingZ: 0, wingY: 0, wingSpan: 1.7,
+  driveFront: 0.5, rearGripBias: 1.12, retro: false, twoTone: null, twoToneY: 0,
 };
 
 export const CARS = [
@@ -29,6 +30,26 @@ export const CARS = [
     cabinTop: [0.95, 1.06, 1.15, 1.17, 1.12, 0.94, 0.78],
     windshieldTopZ: 0.0, sideGlassRearZ: -0.95, sideIntake: true, sideIntakeZ: -0.75,
     tailLights: 'roundDouble', rims: 'fiveSpoke', caliperColor: [0.95, 0.75, 0.05], exhaustCount: 2,
+  },
+  {
+    ...base, id: 'kaze', name: 'Kaze 85R', subtitle: '80 年代輕量後驅掀燈跑車',
+    description: '輕巧的後輪驅動小跑車，車尾靈活好甩，靠走線征服山路。', price: 4000, defaultPaint: 2,
+    topSpeedKmh: 200, engineForce: 7000, mass: 950, grip: 1.34, downforce: 0.3, enginePitch: 1.25,
+    driveFront: 0, rearGripBias: 1.0, retro: true, twoTone: [0.03, 0.03, 0.035], twoToneY: 0.43,
+    wheelRadius: 0.29, frontTireWidth: 0.19, rearTireWidth: 0.19,
+    frontAxleZ: 1.22, rearAxleZ: -1.18, fenderBulgeFront: 0.03, fenderBulgeRear: 0.03,
+    bodyZ: [-2.05, -1.98, -1.7, -1.18, -0.5, 0.2, 0.8, 1.22, 1.75, 2.05, 2.15],
+    bodyHalfWidth: [0.78, 0.82, 0.83, 0.83, 0.83, 0.83, 0.83, 0.83, 0.82, 0.79, 0.72],
+    bodyBottom: [0.32, 0.24, 0.2, 0.19, 0.18, 0.18, 0.18, 0.19, 0.2, 0.24, 0.3],
+    bodyTop: [0.84, 0.88, 0.90, 0.89, 0.87, 0.85, 0.82, 0.76, 0.71, 0.66, 0.58],
+    bodyRoundness: 6.5, bodyTaper: 0.9,
+    cabinZ: [-1.80, -1.45, -1.0, -0.5, 0.0, 0.35, 0.62],
+    cabinHalfWidth: [0.64, 0.69, 0.71, 0.72, 0.72, 0.70, 0.66],
+    cabinTop: [0.95, 1.10, 1.24, 1.30, 1.29, 1.10, 0.88],
+    cabinRoundness: 4, cabinTaper: 0.8,
+    windshieldTopZ: 0.05, sideGlassRearZ: -1.35, rearGlassZ: -0.7,
+    headLights: 'popup', tailLights: 'band', rims: 'tenSpoke',
+    rimColor: [0.6, 0.6, 0.63], caliperColor: [0.18, 0.18, 0.2], exhaustCount: 1,
   },
   {
     ...base, id: 'saetta', name: 'Saetta Classica', subtitle: '1960 年代經典 GT',
@@ -112,6 +133,44 @@ for (const c of CARS) {
 }
 
 export const getCar = (id) => CARS.find((c) => c.id === id) || CARS[0];
+
+// 賽道（皆為原創設計）。control 為 [x, z, 高度]；mountain 類型有高低落差、窄路面與護欄 / 擋土牆
+export const TRACKS = [
+  {
+    id: 'circuit', name: '綠野國際賽道', type: 'circuit', time: 'day', difficulty: 1, reward: 1,
+    desc: '路面寬敞、緩衝區充足的國際賽道，適合熟悉車輛與練習。',
+    scale: 1.45, halfWidth: 7.5,
+    control: [
+      [0, 0], [120, 0], [200, 10], [250, 60], [255, 130], [215, 190], [150, 205], [105, 170],
+      [60, 120], [10, 140], [-40, 200], [-110, 215], [-170, 170], [-185, 95], [-150, 35], [-80, 5],
+    ],
+  },
+  {
+    id: 'kiri', name: '霧嶺山道', type: 'mountain', time: 'night', difficulty: 3, reward: 1.6,
+    desc: '深夜山路。三個連續髮夾彎一路爬上山頂，再沿著 S 彎高速下山。',
+    scale: 1, halfWidth: 4.6,
+    control: [
+      [-80, 0, 0], [-180, 0, 6], [-280, 0, 12], [-300, 6, 13.5], [-310, 22.5, 15], [-300, 39, 16.5],
+      [-280, 45, 18], [-190, 45, 24], [-100, 45, 30], [-80, 51, 31.5], [-70, 67.5, 33], [-80, 84, 34.5],
+      [-100, 90, 36], [-190, 90, 42], [-280, 90, 48], [-300, 96, 49.5], [-310, 112.5, 51], [-300, 129, 52.5],
+      [-280, 135, 54], [-170, 135, 58], [-60, 135, 61], [0, 150, 62], [60, 140, 56.4], [120, 125, 50.6],
+      [150, 90, 46.4], [130, 55, 42.7], [155, 20, 38.7], [195, 0, 34.5], [215, -35, 30.8], [195, -70, 27.1],
+      [150, -80, 22.8], [80, -70, 16.3], [20, -55, 10.6], [-40, -25, 4.4],
+    ],
+  },
+  {
+    id: 'momiji', name: '楓谷峠', type: 'mountain', time: 'autumn', difficulty: 2, reward: 1.4,
+    desc: '楓紅山谷中的連續 S 彎，高低落差大，考驗煞車點與走線。',
+    scale: 1.15, halfWidth: 5,
+    control: [
+      [0, 0, 0], [80, -10, 3], [150, 10, 8], [200, -20, 12], [260, 0, 16], [300, 50, 20], [280, 100, 25],
+      [240, 130, 29], [250, 180, 33], [300, 210, 37], [330, 260, 42], [290, 300, 46], [220, 290, 48],
+      [170, 250, 47], [120, 270, 44], [60, 240, 40], [30, 190, 35], [-20, 170, 30], [-70, 165, 25],
+      [-115, 135, 20], [-110, 85, 15], [-80, 55, 10], [-95, 20, 6], [-50, -8, 2],
+    ],
+  },
+];
+export const getTrack = (id) => TRACKS.find((t) => t.id === id) || TRACKS[0];
 
 // 商店商品（測試模式：不會實際扣款）
 export const PRODUCTS = [

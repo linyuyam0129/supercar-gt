@@ -1,12 +1,12 @@
-// 賽道：Catmull-Rom 中心線、柏油路面、彎道路緣石、碎石緩衝區、W 型護欄、起伏地形、
-// 維修區建築、看台、廣告看板、樹林與五燈起跑燈號。也提供最近點 / 側向距離查詢。
+// 賽道：Catmull-Rom 中心線、柏油路面、W 型護欄、地形、樹林與五燈起跑燈號。
+// circuit：路緣石、碎石緩衝區、維修區、看台、廣告看板。
+// mountain：有高低落差的窄山路、白色邊線 + 中線、下坡側護欄 / 上坡側擋土牆、彎道指示牌、山脈地形。
+// 也提供最近點 / 側向距離 / 路面高度查詢。
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { TRACKS } from './data.js';
 
-const CONTROL = [
-  [0, 0], [120, 0], [200, 10], [250, 60], [255, 130], [215, 190], [150, 205], [105, 170],
-  [60, 120], [10, 140], [-40, 200], [-110, 215], [-170, 170], [-185, 95], [-150, 35], [-80, 5],
-];
+const lerp = (a, b, t) => a + (b - a) * t;
 const sstep = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
 // 簡易值雜訊
@@ -40,14 +40,16 @@ function noiseFill(ctx, w, h, fn) {
 }
 
 export class Track {
-  constructor(scene, { quality = 'high' } = {}) {
+  constructor(scene, { quality = 'high', def = TRACKS[0] } = {}) {
     this.scene = scene;
     this.quality = quality;
-    this.scale = 1.45;
-    this.halfWidth = 7.5;
-    this.curbWidth = 1.2;
-    this.gravelWidth = 5;
-    this.barrierOffset = 20;
+    this.def = def;
+    this.mountain = def.type === 'mountain';
+    this.scale = def.scale ?? 1.45;
+    this.halfWidth = def.halfWidth ?? 7.5;
+    this.curbWidth = this.mountain ? 0.8 : 1.2;      // 山路：路肩
+    this.gravelWidth = this.mountain ? 0 : 5;
+    this.barrierOffset = this.mountain ? this.halfWidth + 2 : 20;
     this.spacing = 2;
     this.checkpointCount = 10;
     this.checkpointZone = 15;
@@ -57,11 +59,20 @@ export class Track {
 
     this.generatePath();
     this.computeBarriers();
-    this.buildTerrain();
-    this.buildRoad();
-    this.buildBarriers();
-    this.buildStart();
-    this.buildBuildings();
+    if (this.mountain) {
+      this.buildHeightField();
+      this.buildMountainTerrain();
+      this.buildMountainRoad();
+      this.buildMountainBarriers();
+      this.buildStart();
+      this.buildSigns();
+    } else {
+      this.buildTerrain();
+      this.buildRoad();
+      this.buildBarriers();
+      this.buildStart();
+      this.buildBuildings();
+    }
     this.buildTrees();
     this.checkpoints = [];
     for (let i = 0; i < this.checkpointCount; i++) this.checkpoints.push(Math.floor(i * this.count / this.checkpointCount));
@@ -70,21 +81,31 @@ export class Track {
 
   get startIndex() { return this.wrap(-8); }
   wrap(i) { return ((i % this.count) + this.count) % this.count; }
+  wrapN(i, n) { return ((i % n) + n) % n; }
 
   // ---------------- 路徑 ----------------
   generatePath() {
-    const n = CONTROL.length, s = this.scale;
-    const ctrl = CONTROL.map(([x, z]) => new THREE.Vector3(x * s, 0, z * s));
-    const curve = new THREE.CatmullRomCurve3(ctrl, true, 'catmullrom', 0.5);
+    const s = this.scale;
+    const ctrl = this.def.control.map(([x, z, y = 0]) => new THREE.Vector3(x * s, y, z * s));
+    const curve = new THREE.CatmullRomCurve3(ctrl, true, this.mountain ? 'centripetal' : 'catmullrom', 0.5);
     const total = curve.getLength();
     this.totalLength = total;
     this.count = Math.max(32, Math.round(total / this.spacing));
     const pts = curve.getSpacedPoints(this.count).slice(0, this.count);
+    if (this.mountain) {
+      // 高度平滑：避免路面忽高忽低
+      let ys = pts.map((p) => p.y);
+      for (let pass = 0; pass < 8; pass++) ys = ys.map((_, i) => { let a = 0; for (let o = -5; o <= 5; o++) a += ys[this.wrapN(i + o, ys.length)]; return a / 11; });
+      pts.forEach((p, i) => { p.y = ys[i]; });
+    }
     this.points = pts;
     this.dist = pts.map((_, i) => i * total / this.count);
-    this.tangents = []; this.rights = [];
+    this.tangents = []; this.rights = []; this.slopes = [];
     for (let i = 0; i < this.count; i++) {
-      const t = new THREE.Vector3().subVectors(pts[this.wrap(i + 1)], pts[this.wrap(i - 1)]).normalize();
+      const t = new THREE.Vector3().subVectors(pts[this.wrap(i + 1)], pts[this.wrap(i - 1)]);
+      const hl = Math.hypot(t.x, t.z);
+      this.slopes.push(t.y / hl);               // 坡度 dy / 水平距離
+      t.y = 0; t.normalize();                    // 水平切線（物理與查詢都用水平面）
       this.tangents.push(t);
       this.rights.push(new THREE.Vector3(-t.z, 0, t.x)); // 行進方向的右手邊（俯視 x 右 z 下時）
     }
@@ -128,6 +149,16 @@ export class Track {
     const p = this.points[i], r = this.rights[i];
     return (x - p.x) * r.x + (z - p.z) * r.z;
   }
+  /** 路面高度（沿切線用坡度內插）與坡度向量 */
+  roadAt(x, z, i, out = { y: 0, gx: 0, gz: 0 }) {
+    const p = this.points[i], t = this.tangents[i], sl = this.slopes[i];
+    const along = (x - p.x) * t.x + (z - p.z) * t.z;
+    out.y = p.y + along * sl;
+    out.gx = t.x * sl; out.gz = t.z * sl;
+    return out;
+  }
+  /** 任意位置的地面高度（給鏡頭避免穿進山壁用） */
+  groundAt(x, z) { return this.mountain ? this.terrainH(x, z) : 0; }
 
   setStartLights(on) {
     if (!this.lights) return;
@@ -159,7 +190,7 @@ export class Track {
     if (n.count && n.getY(0) < 0) { for (let k = 0; k < idx.length; k += 3) { const t = idx[k + 1]; idx[k + 1] = idx[k + 2]; idx[k + 2] = t; } g.setIndex(idx); g.computeVertexNormals(); }
     return g;
   }
-  edge(i, off) { const p = this.points[i], r = this.rights[i]; return new THREE.Vector3(p.x + r.x * off, 0, p.z + r.z * off); }
+  edge(i, off) { const p = this.points[i], r = this.rights[i]; return new THREE.Vector3(p.x + r.x * off, p.y, p.z + r.z * off); }
   mesh(geo, mat, { cast = false, receive = true } = {}) {
     const m = new THREE.Mesh(geo, mat);
     m.castShadow = cast; m.receiveShadow = receive;
@@ -254,7 +285,7 @@ export class Track {
       const k = prof.length;
       for (let j = 0; j <= this.count; j++) {
         const i = j % this.count;
-        for (const [d, y] of prof) { const e = this.edge(i, side * (offs[i] + d)); pos.push(e.x, y, e.z); }
+        for (const [d, y] of prof) { const e = this.edge(i, side * (offs[i] + d)); pos.push(e.x, e.y + y, e.z); }
       }
       for (let j = 0; j < this.count; j++) for (let p = 0; p < k - 1; p++) {
         const a = j * k + p, b = a + 1, c = a + k, d = c + 1;
@@ -295,17 +326,14 @@ export class Track {
       for (let y = 0; y < h; y += 4) for (let x = 0; x < w; x += 4) { ctx.fillStyle = ((x + y) / 4) % 2 ? '#111' : '#eee'; ctx.fillRect(x, y, 4, 4); }
     }, { repeat: false, aniso: 4 });
     checker.magFilter = THREE.NearestFilter;
-    const line = new THREE.Mesh(new THREE.PlaneGeometry(hw * 2, 1.6), new THREE.MeshStandardMaterial({ map: checker, roughness: 0.6 }));
-    line.rotation.set(-Math.PI / 2, 0, 0);
-    line.rotateOnWorldAxis(new THREE.Vector3(0, 1, 0), yaw);
-    line.position.set(p.x, 0.04, p.z);
-    line.receiveShadow = true;
-    this.group.add(line);
+    const mask = new Array(this.count).fill(false); mask[0] = mask[1] = true;
+    this.mesh(this.strip((i) => this.edge(i, -hw), (i) => this.edge(i, hw), 0, 1, 0.5, 0.04, mask),
+      new THREE.MeshStandardMaterial({ map: checker, roughness: 0.6, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
 
     // 起跑格線
     const white = new THREE.MeshStandardMaterial({ color: 0xe6e6e0, roughness: 0.6 });
     const gridGeo = [];
-    for (let g = 0; g < 6; g++) {
+    for (let g = 0; g < (this.mountain ? 0 : 6); g++) {
       const idx = this.wrap(-6 - g * 5);
       const side = g % 2 === 0 ? -1 : 1;
       const gp = this.edge(idx, side * hw * 0.45);
@@ -316,13 +344,13 @@ export class Track {
       b.translate(sp.x - this.tangents[idx].x * 0.6, 0.035, sp.z - this.tangents[idx].z * 0.6);
       gridGeo.push(a, b);
     }
-    this.group.add(new THREE.Mesh(mergeGeometries(gridGeo), white));
+    if (gridGeo.length) this.group.add(new THREE.Mesh(mergeGeometries(gridGeo), white));
 
     // 龍門架 + 五顆起跑燈
     const metal = new THREE.MeshStandardMaterial({ color: 0x2a2c30, roughness: 0.45, metalness: 0.75 });
     const px = hw + this.curbWidth + 3;
     const gantry = new THREE.Group();
-    gantry.position.set(p.x, 0, p.z);
+    gantry.position.set(p.x, p.y, p.z);
     gantry.rotation.y = yaw;
     this.group.add(gantry);
     const box = (w, h, d, x, y, z, mat) => { const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); b.position.set(x, y, z); b.castShadow = true; gantry.add(b); return b; };
@@ -426,9 +454,258 @@ export class Track {
     }
   }
 
+  // ================= 山路 =================
+  /** 把路面取樣點放進格子，方便快速查詢附近的路 */
+  buildHeightField() {
+    const cell = 25;
+    this.hfCell = cell;
+    this.hfBuckets = new Map();
+    this.hfSamples = [];
+    let sum = 0;
+    for (let i = 0; i < this.count; i += 3) {
+      const p = this.points[i];
+      const smp = { x: p.x, z: p.z, y: p.y, i };
+      this.hfSamples.push(smp);
+      sum += p.y;
+      const k = Math.floor(p.x / cell) + ',' + Math.floor(p.z / cell);
+      if (!this.hfBuckets.has(k)) this.hfBuckets.set(k, []);
+      this.hfBuckets.get(k).push(smp);
+    }
+    this.meanY = sum / this.hfSamples.length;
+    this.minY = Math.min(...this.points.map((p) => p.y));
+  }
+  /** 回傳 { d: 與路中心距離, y: 最近路面高度, base: 平滑後的周邊高度, i: 最近點 } */
+  roadInfo(x, z) {
+    const cell = this.hfCell, R = 110, sig2 = 2 * 32 * 32;
+    const cx = Math.floor(x / cell), cz = Math.floor(z / cell), rc = Math.ceil(R / cell);
+    let best = null, bd = Infinity, wsum = 0.004, hsum = 0.004 * this.meanY;
+    for (let a = -rc; a <= rc; a++) for (let b = -rc; b <= rc; b++) {
+      const list = this.hfBuckets.get((cx + a) + ',' + (cz + b));
+      if (!list) continue;
+      for (const s of list) {
+        const d2 = (s.x - x) ** 2 + (s.z - z) ** 2;
+        if (d2 < bd) { bd = d2; best = s; }
+        if (d2 < R * R) { const w = Math.exp(-d2 / sig2); wsum += w; hsum += w * s.y; }
+      }
+    }
+    const base = hsum / wsum;
+    if (!best) {
+      // 視窗內沒有路：掃全部取樣點求真實距離（只發生在遠處地形）
+      for (const s of this.hfSamples) { const d2 = (s.x - x) ** 2 + (s.z - z) ** 2; if (d2 < bd) { bd = d2; best = s; } }
+      return { d: Math.sqrt(bd), y: best.y, base, i: best.i };
+    }
+    // 在完整點列上細找最近點
+    let bi = best.i, bd2 = Infinity;
+    for (let o = -3; o <= 3; o++) {
+      const i = this.wrap(best.i + o), p = this.points[i];
+      const d2 = (p.x - x) ** 2 + (p.z - z) ** 2;
+      if (d2 < bd2) { bd2 = d2; bi = i; }
+    }
+    const y = this.roadAt(x, z, bi, {}).y;
+    return { d: Math.sqrt(bd2), y, base, i: bi };
+  }
+  terrainH(x, z) {
+    const info = this.roadInfo(x, z);
+    const d = info.d, hw = this.halfWidth;
+    const n1 = fbm(x * 0.004 + 11, z * 0.004 + 5, 4);
+    const n2 = vnoise(x * 0.02 + 3, z * 0.02 + 9);
+    const rough = sstep(hw + 4, hw + 70, d);
+    const ridge = 1 - Math.abs(vnoise(x * 0.0025 + 40, z * 0.0025 + 8) * 2 - 1); // 山脊
+    const h = info.base + rough * ((n1 - 0.45) * 40 + (n2 - 0.5) * 6) + sstep(220, 1100, d) * (n1 * 150 + ridge * 120 - 20);
+    const blend = sstep(hw + 2.6, hw + 15, d);
+    return lerp(info.y - 0.3, h, blend);
+  }
+
+  buildMountainTerrain() {
+    const b = this.bounds, margin = 130, step = this.quality === 'low' ? 6 : 4;
+    const axis = (lo, hi) => {
+      const out = [];
+      let v = lo - 1500;
+      // 外圍稀疏、賽道附近密集
+      while (v < lo - margin) { out.push(v); v += Math.max(step, Math.min(80, (lo - margin - v) * 0.12)); }
+      for (v = lo - margin; v < hi + margin; v += step) out.push(v);
+      v = hi + margin;
+      while (v < hi + 1500) { out.push(v); v += Math.max(step, Math.min(80, (v - hi - margin) * 0.12 + step)); }
+      out.push(hi + 1500);
+      return out;
+    };
+    const xs = axis(b.min.x, b.max.x), zs = axis(b.min.z, b.max.z);
+    const nx = xs.length, nz = zs.length;
+    const pos = new Float32Array(nx * nz * 3), colors = new Float32Array(nx * nz * 3), uvs = new Float32Array(nx * nz * 2);
+    for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
+      const v = j * nx + i;
+      pos[v * 3] = xs[i]; pos[v * 3 + 1] = this.terrainH(xs[i], zs[j]); pos[v * 3 + 2] = zs[j];
+      uvs[v * 2] = xs[i] / 6; uvs[v * 2 + 1] = zs[j] / 6;
+    }
+    const idx = [];
+    for (let j = 0; j < nz - 1; j++) for (let i = 0; i < nx - 1; i++) {
+      const a = j * nx + i, b2 = a + 1, c = a + nx, d = c + 1;
+      idx.push(a, c, b2, b2, c, d);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    const nrm = geo.getAttribute('normal');
+    const autumn = this.def.time === 'autumn';
+    const grass = autumn ? new THREE.Color(0.30, 0.22, 0.08) : new THREE.Color(0.11, 0.22, 0.07);
+    const forest = autumn ? new THREE.Color(0.34, 0.12, 0.04) : new THREE.Color(0.06, 0.15, 0.05);
+    const rock = new THREE.Color(0.33, 0.31, 0.28), snow = new THREE.Color(0.8, 0.82, 0.85);
+    const tmp = new THREE.Color();
+    for (let v = 0; v < nx * nz; v++) {
+      const x = pos[v * 3], y = pos[v * 3 + 1], z = pos[v * 3 + 2];
+      const steep = sstep(0.72, 0.5, nrm.getY(v));
+      const n = vnoise(x * 0.008 + 50, z * 0.008 + 50);
+      tmp.copy(grass).lerp(forest, sstep(0.35, 0.7, n)).lerp(rock, steep).lerp(snow, sstep(230, 300, y - this.minY) * (1 - steep * 0.6));
+      const s = 0.85 + hash(x, z) * 0.2;
+      colors[v * 3] = tmp.r * s; colors[v * 3 + 1] = tmp.g * s; colors[v * 3 + 2] = tmp.b * s;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    const detail = canvasTex(256, 256, (ctx, w, h) => noiseFill(ctx, w, h, (x, y) => {
+      const v = 150 + (fbm(x * 0.03, y * 0.03, 3) - 0.5) * 120 + (vnoise(x * 0.9, y * 0.12) - 0.5) * 50 + (hash(x, y) - 0.5) * 50;
+      return [v, v, v];
+    }), { srgb: false });
+    this.mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, map: detail, roughness: 0.95 }));
+  }
+
+  buildMountainRoad() {
+    const asphalt = canvasTex(256, 512, (ctx, w, h) => {
+      noiseFill(ctx, w, h, (x, y) => {
+        const n = fbm(x * 0.05, y * 0.05, 3) * 0.6 + hash(x, y) * 0.4;
+        const v = 46 + n * 34;
+        return [v, v, v + 2];
+      });
+      ctx.fillStyle = 'rgba(235,235,230,0.9)';
+      ctx.fillRect(w * 0.03, 0, w * 0.03, h); ctx.fillRect(w * 0.94, 0, w * 0.03, h);
+      ctx.fillStyle = 'rgba(240,190,40,0.9)'; // 中央黃色虛線
+      ctx.fillRect(w * 0.49, 0, w * 0.025, h * 0.5);
+      ctx.fillStyle = 'rgba(15,15,15,0.14)';
+      ctx.fillRect(w * 0.2, 0, w * 0.07, h); ctx.fillRect(w * 0.73, 0, w * 0.07, h);
+    });
+    const hw = this.halfWidth;
+    const roadMat = new THREE.MeshStandardMaterial({ map: asphalt, roughness: 0.8, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+    this.mesh(this.strip((i) => this.edge(i, -hw), (i) => this.edge(i, hw), 0, 1, 1 / 12, 0.02), roadMat);
+    const dirt = canvasTex(256, 256, (ctx, w, h) => noiseFill(ctx, w, h, (x, y) => {
+      const v = 110 + (hash(x, y) - 0.5) * 80 + (vnoise(x * 0.2, y * 0.2) - 0.5) * 40;
+      return [v * 0.8, v * 0.74, v * 0.62];
+    }));
+    const dirtMat = new THREE.MeshStandardMaterial({ map: dirt, roughness: 1 });
+    this.mesh(this.strip((i) => this.edge(i, -(this.leftBarrier[i] + 0.6)), (i) => this.edge(i, -hw), 0, 2, 1 / 4, 0.0), dirtMat);
+    this.mesh(this.strip((i) => this.edge(i, hw), (i) => this.edge(i, this.rightBarrier[i] + 0.6), 0, 2, 1 / 4, 0.0), dirtMat);
+  }
+
+  /** 沿賽道一側擠出剖面（護欄 / 擋土牆）；use[i] 決定哪些段要建 */
+  extrude(side, prof, use, mat) {
+    const offs = side < 0 ? this.leftBarrier : this.rightBarrier;
+    const pos = [], idx = [], k = prof.length;
+    for (let j = 0; j <= this.count; j++) {
+      const i = j % this.count;
+      for (const [d, y] of prof) { const e = this.edge(i, side * (offs[i] + d)); pos.push(e.x, e.y + y, e.z); }
+    }
+    for (let j = 0; j < this.count; j++) {
+      if (!use[j] || !use[(j + 1) % this.count]) continue;
+      for (let p = 0; p < k - 1; p++) {
+        const a = j * k + p, b = a + 1, c = a + k, d = c + 1;
+        idx.push(a, c, b, b, c, d);
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    return this.mesh(g, mat, { cast: true });
+  }
+
+  buildMountainBarriers() {
+    const steel = new THREE.MeshStandardMaterial({ color: 0xb4b8bc, roughness: 0.35, metalness: 0.8, side: THREE.DoubleSide });
+    const concrete = new THREE.MeshStandardMaterial({ color: 0x8a8984, roughness: 0.9, side: THREE.DoubleSide });
+    const rail = [[0, 0.42], [0.06, 0.49], [0.02, 0.57], [0.06, 0.65], [0, 0.73]];
+    const wallP = [[0.05, -0.6], [0, 0.05], [0.02, 1.0], [0.35, 1.05], [0.9, 1.6]];
+    const postGeo = new THREE.BoxGeometry(0.12, 0.8, 0.12);
+    const postMat = new THREE.MeshStandardMaterial({ color: 0x8a8d90, roughness: 0.5, metalness: 0.6 });
+    const posts = [], reflect = [];
+    for (const side of [-1, 1]) {
+      const offs = side < 0 ? this.leftBarrier : this.rightBarrier;
+      // 上坡側（地形明顯高於路面）用擋土牆，其餘用護欄
+      let wall = new Array(this.count).fill(false);
+      for (let i = 0; i < this.count; i += 2) {
+        const e = this.edge(i, side * (offs[i] + 6));
+        const hi = this.terrainH(e.x, e.z) > this.points[i].y + 1.2;
+        wall[i] = hi; wall[this.wrap(i + 1)] = hi;
+      }
+      // 去掉零碎片段
+      for (let pass = 0; pass < 2; pass++) { const w0 = wall; wall = w0.map((v, i) => { let c = 0; for (let o = -4; o <= 4; o++) c += w0[this.wrap(i + o)] ? 1 : 0; return c >= 5; }); }
+      const railUse = wall.map((w, i) => !w || !wall[this.wrap(i + 1)] || !wall[this.wrap(i - 1)]);
+      this.extrude(side, rail, railUse, steel);
+      this.extrude(side, wallP, wall, concrete);
+      for (let i = 0; i < this.count; i += 2) {
+        if (wall[i]) continue;
+        const e = this.edge(i, side * (offs[i] + 0.14));
+        const yaw = Math.atan2(this.tangents[i].x, this.tangents[i].z);
+        posts.push({ x: e.x, y: e.y + 0.4, z: e.z, yaw });
+        if (i % 8 === 0) reflect.push({ x: e.x, y: e.y + 0.86, z: e.z, yaw });
+      }
+    }
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), one = new THREE.Vector3(1, 1, 1), up = new THREE.Vector3(0, 1, 0);
+    const inst = new THREE.InstancedMesh(postGeo, postMat, Math.max(1, posts.length));
+    posts.forEach((p, k) => { q.setFromAxisAngle(up, p.yaw); m.compose(new THREE.Vector3(p.x, p.y, p.z), q, one); inst.setMatrixAt(k, m); });
+    inst.count = posts.length;
+    this.group.add(inst);
+    // 反光片（夜間很亮）
+    const night = this.def.time === 'night';
+    const refMat = new THREE.MeshStandardMaterial({ color: 0xffa020, emissive: 0xff8a10, emissiveIntensity: night ? 1.6 : 0.3, roughness: 0.3 });
+    const ref = new THREE.InstancedMesh(new THREE.BoxGeometry(0.1, 0.12, 0.05), refMat, Math.max(1, reflect.length));
+    reflect.forEach((p, k) => { q.setFromAxisAngle(up, p.yaw); m.compose(new THREE.Vector3(p.x, p.y, p.z), q, one); ref.setMatrixAt(k, m); });
+    ref.count = reflect.length;
+    this.group.add(ref);
+  }
+
+  /** 急彎外側的箭頭指示牌（箭頭指向前進方向） */
+  buildSigns() {
+    const night = this.def.time === 'night';
+    const mk = (dir) => {
+      const map = canvasTex(128, 64, (ctx, w, h) => {
+        ctx.fillStyle = '#f5c518'; ctx.fillRect(0, 0, w, h);
+        ctx.fillStyle = '#111';
+        for (let k = 0; k < 3; k++) {
+          const x0 = 10 + k * 38;
+          ctx.beginPath();
+          if (dir > 0) { ctx.moveTo(x0, 10); ctx.lineTo(x0 + 26, 32); ctx.lineTo(x0, 54); ctx.lineTo(x0 + 10, 54); ctx.lineTo(x0 + 36, 32); ctx.lineTo(x0 + 10, 10); }
+          else { ctx.moveTo(x0 + 36, 10); ctx.lineTo(x0 + 10, 32); ctx.lineTo(x0 + 36, 54); ctx.lineTo(x0 + 26, 54); ctx.lineTo(x0, 32); ctx.lineTo(x0 + 26, 10); }
+          ctx.fill();
+        }
+      }, { repeat: false });
+      return new THREE.MeshStandardMaterial({ map, emissiveMap: map, emissive: new THREE.Color(night ? 0.45 : 0, night ? 0.45 : 0, night ? 0.45 : 0), roughness: 0.5 });
+    };
+    const left = mk(-1), right = mk(1);
+    const geo = new THREE.BoxGeometry(1.6, 0.8, 0.06);
+    const poleGeo = new THREE.CylinderGeometry(0.04, 0.04, 1.4, 6);
+    const poleMat = new THREE.MeshStandardMaterial({ color: 0x777777, roughness: 0.6, metalness: 0.5 });
+    let last = -99;
+    for (let i = 0; i < this.count; i += 3) {
+      const k = this.curvature[i];
+      if (Math.abs(k) < 1 / 45 || i - last < 9) continue;
+      last = i;
+      const side = k > 0 ? 1 : -1; // 彎道外側
+      const offs = side < 0 ? this.leftBarrier : this.rightBarrier;
+      const e = this.edge(i, side * (offs[i] + 0.5));
+      const r = this.rights[i];
+      // 看板正面朝向路面；從路面看過去，前進方向在右側外側牌的左邊
+      const sign = new THREE.Mesh(geo, side > 0 ? left : right);
+      sign.position.set(e.x, e.y + 1.5, e.z);
+      sign.rotation.y = Math.atan2(-r.x * side, -r.z * side);
+      this.group.add(sign);
+      const pole = new THREE.Mesh(poleGeo, poleMat);
+      pole.position.set(e.x, e.y + 0.6, e.z);
+      this.group.add(pole);
+    }
+  }
+
   // ---------------- 樹林 ----------------
   buildTrees() {
-    const target = this.quality === 'low' ? 260 : 520;
+    const mtn = this.mountain;
+    const target = (this.quality === 'low' ? 260 : 520) * (mtn ? 1.8 : 1);
     const trunkGeo = new THREE.CylinderGeometry(0.1, 0.26, 6.8, 6); trunkGeo.translate(0, 3.1, 0);
     const pineParts = [];
     for (let c = 0; c < 5; c++) { const r = 2.5 - c * 0.42; const g = new THREE.ConeGeometry(r, 2.6, 8); g.translate(0, 1.6 + c * 1.45 + 1.3, 0); pineParts.push(g); }
@@ -446,18 +723,28 @@ export class Track {
 
     const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3524, roughness: 0.95 });
     const pineMat = new THREE.MeshStandardMaterial({ color: 0x173d1c, roughness: 0.9, flatShading: true });
-    const leafMat = new THREE.MeshStandardMaterial({ color: 0x2f5a1c, roughness: 0.9, flatShading: true });
+    const autumn = this.def.time === 'autumn';
+    const leafMat = new THREE.MeshStandardMaterial({ color: autumn ? 0xffffff : 0x2f5a1c, roughness: 0.9, flatShading: true });
+    const fall = [0xc0301a, 0xd8641a, 0xe0a020, 0x9a2a14, 0x5a6a1c].map((c) => new THREE.Color(c));
 
     const spots = [];
-    const b = this.bounds, minClear = this.barrierOffset + 12;
+    const b = this.bounds, minClear = mtn ? this.barrierOffset + 3 : this.barrierOffset + 12;
     const sample = [];
     for (let i = 0; i < this.count; i += 3) sample.push(this.points[i]);
     const start = this.points[0];
     let seed = 42;
     const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
-    for (let a = 0; a < 9000 && spots.length < target; a++) {
+    for (let a = 0; a < 12000 && spots.length < target; a++) {
       const x = b.min.x - 260 + rnd() * (b.max.x - b.min.x + 520);
       const z = b.min.z - 260 + rnd() * (b.max.z - b.min.z + 520);
+      if (mtn) {
+        const info = this.roadInfo(x, z);
+        if (info.d < minClear || rnd() > 0.35 + vnoise(x * 0.012 + 7, z * 0.012 + 3) * 0.9) continue;
+        const y = this.terrainH(x, z);
+        if (y - this.minY > 200) continue;
+        spots.push({ x, y: y - 0.3, z, s: 0.8 + rnd() * 0.7, rot: rnd() * Math.PI * 2, pine: rnd() < (this.def.time === 'autumn' ? 0.35 : 0.75) });
+        continue;
+      }
       if ((x - start.x) ** 2 + (z - start.z) ** 2 < 140 * 140) continue;
       let near = Infinity;
       for (const p of sample) near = Math.min(near, (p.x - x) ** 2 + (p.z - z) ** 2);
@@ -471,7 +758,10 @@ export class Track {
     const mk = (geo, mat, list) => {
       const im = new THREE.InstancedMesh(geo, mat, Math.max(1, list.length));
       const m = new THREE.Matrix4(), q = new THREE.Quaternion();
-      list.forEach((t, i) => { q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), t.rot); m.compose(new THREE.Vector3(t.x, t.y, t.z), q, new THREE.Vector3(t.s, t.s, t.s)); im.setMatrixAt(i, m); });
+      list.forEach((t, i) => {
+        q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), t.rot); m.compose(new THREE.Vector3(t.x, t.y, t.z), q, new THREE.Vector3(t.s, t.s, t.s)); im.setMatrixAt(i, m);
+        if (autumn && mat === leafMat) im.setColorAt(i, fall[Math.floor(hash(t.x, t.z) * fall.length)]);
+      });
       im.count = list.length;
       im.castShadow = this.quality !== 'low';
       this.group.add(im);

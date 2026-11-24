@@ -2,7 +2,8 @@
 // 失誤偵測（偏離賽道、逆向、碰撞、打滑、錯過檢查點）與三種提醒（震動 / 語音 / 畫面）
 import * as THREE from 'three';
 import { Sky } from 'three/addons/objects/Sky.js';
-import { MISTAKES, PAINTS } from './data.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { MISTAKES, PAINTS, getTrack } from './data.js';
 import { Profile, Settings } from './store.js';
 import { Input, rumble } from './input.js';
 import { buildCar } from './carModel.js';
@@ -28,31 +29,49 @@ export class Race {
     this.hooks = hooks; // { onFinish(html), toast(text) }
     this.quality = quality;
     const scene = this.scene = new THREE.Scene();
+    const def = this.trackDef = getTrack(Settings.track);
+    const night = def.time === 'night', autumn = def.time === 'autumn';
 
-    // 天空、太陽、霧、環境反射
-    const sky = new Sky();
-    sky.scale.setScalar(4000);
-    const u = sky.material.uniforms;
-    u.turbidity.value = 3.2; u.rayleigh.value = 1.4; u.mieCoefficient.value = 0.004; u.mieDirectionalG.value = 0.85;
-    const sunDir = new THREE.Vector3().setFromSphericalCoords(1, THREE.MathUtils.degToRad(52), THREE.MathUtils.degToRad(140));
-    u.sunPosition.value.copy(sunDir);
-    scene.add(sky);
+    // 天空、太陽、霧、環境反射（依賽道時段）
+    const sunDir = new THREE.Vector3().setFromSphericalCoords(1, THREE.MathUtils.degToRad(autumn ? 68 : night ? 40 : 52), THREE.MathUtils.degToRad(autumn ? 215 : 140));
     const pmrem = new THREE.PMREMGenerator(renderer);
-    const envScene = new THREE.Scene();
-    const sky2 = new Sky(); sky2.scale.setScalar(1000);
-    Object.assign(sky2.material.uniforms.sunPosition.value, sunDir);
-    for (const k of ['turbidity', 'rayleigh', 'mieCoefficient', 'mieDirectionalG']) sky2.material.uniforms[k].value = u[k].value;
-    envScene.add(sky2);
-    const ground = new THREE.Mesh(new THREE.CircleGeometry(900, 16).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0x3a4a2a }));
-    ground.position.y = -2;
-    envScene.add(ground);
-    this.envMap = pmrem.fromScene(envScene, 0.02).texture;
+    if (night) {
+      scene.background = new THREE.Color(0x05070d);
+      this.envMap = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+      scene.environmentIntensity = 0.08;
+      scene.fog = new THREE.Fog(0x070a12, 40, 420);
+      // 星空
+      const n = 900, sp = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        const v = new THREE.Vector3().setFromSphericalCoords(1800, Math.acos(Math.random() * 0.95), Math.random() * Math.PI * 2);
+        sp.set([v.x, v.y, v.z], i * 3);
+      }
+      const sg = new THREE.BufferGeometry(); sg.setAttribute('position', new THREE.BufferAttribute(sp, 3));
+      const stars = new THREE.Points(sg, new THREE.PointsMaterial({ color: 0xcfd8ff, size: 2.2, sizeAttenuation: false, fog: false }));
+      scene.add(stars); this.stars = stars;
+    } else {
+      const sky = new Sky();
+      sky.scale.setScalar(4000);
+      const u = sky.material.uniforms;
+      u.turbidity.value = autumn ? 6 : 3.2; u.rayleigh.value = autumn ? 2.4 : 1.4; u.mieCoefficient.value = autumn ? 0.006 : 0.004; u.mieDirectionalG.value = 0.85;
+      u.sunPosition.value.copy(sunDir);
+      scene.add(sky);
+      const envScene = new THREE.Scene();
+      const sky2 = new Sky(); sky2.scale.setScalar(1000);
+      Object.assign(sky2.material.uniforms.sunPosition.value, sunDir);
+      for (const k of ['turbidity', 'rayleigh', 'mieCoefficient', 'mieDirectionalG']) sky2.material.uniforms[k].value = u[k].value;
+      envScene.add(sky2);
+      const ground = new THREE.Mesh(new THREE.CircleGeometry(900, 16).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: autumn ? 0x5a3a1a : 0x3a4a2a }));
+      ground.position.y = -2;
+      envScene.add(ground);
+      this.envMap = pmrem.fromScene(envScene, 0.02).texture;
+      scene.environmentIntensity = 0.9;
+      scene.fog = autumn ? new THREE.Fog(0xd9c3a3, 260, 2200) : new THREE.Fog(0xb4c4d6, 380, 2600);
+    }
     scene.environment = this.envMap;
-    scene.environmentIntensity = 0.9;
     pmrem.dispose();
-    scene.fog = new THREE.Fog(0xb4c4d6, 380, 2600);
 
-    const sun = this.sun = new THREE.DirectionalLight(0xfff1dc, 2.6);
+    const sun = this.sun = new THREE.DirectionalLight(night ? 0x8fa6ff : autumn ? 0xffd2a0 : 0xfff1dc, night ? 0.35 : autumn ? 2.5 : 2.6);
     sun.position.copy(sunDir).multiplyScalar(120);
     sun.castShadow = quality !== 'low';
     const ss = quality === 'high' ? 2048 : 1024;
@@ -61,15 +80,27 @@ export class Race {
     sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.03;
     scene.add(sun, sun.target);
     this.sunOffset = sunDir.clone().multiplyScalar(150);
-    scene.add(new THREE.HemisphereLight(0xcfe0ff, 0x4a5a35, 0.5));
+    scene.add(new THREE.HemisphereLight(night ? 0x34406a : 0xcfe0ff, night ? 0x0a0c10 : autumn ? 0x6a4a2a : 0x4a5a35, night ? 0.25 : 0.5));
 
-    this.track = new Track(scene, { quality });
+    this.track = new Track(scene, { quality, def });
 
     // 玩家賽車
     const spec = this.spec = Profile.selectedCar();
     this.model = buildCar(spec, PAINTS[Profile.paintOf(spec)], { shadows: quality !== 'low' });
     scene.add(this.model.root);
     this.car = new CarPhysics(spec);
+    if (night) {
+      // 車頭燈
+      const head = new THREE.SpotLight(0xfff4e0, 220, 160, 0.5, 0.55, 1.3);
+      head.position.set(0, 0.75, spec.frontZ - 0.3);
+      head.target.position.set(0, 0, spec.frontZ + 30);
+      head.castShadow = false;
+      this.model.root.add(head, head.target);
+      const fill = new THREE.PointLight(0xffe8d0, 6, 12, 1.5);
+      fill.position.set(0, 1.2, spec.frontZ + 3);
+      this.model.root.add(fill);
+    }
+    this.road = { y: 0, gx: 0, gz: 0 };
 
     camera.near = 0.1; camera.far = 5000; camera.fov = 60;
     camera.updateProjectionMatrix();
@@ -108,6 +139,7 @@ export class Race {
   placeCarAt(idx, lateral = 0) {
     const p = this.track.points[idx], t = this.track.tangents[idx], r = this.track.rights[idx];
     this.car.reset(p.x + r.x * lateral, p.z + r.z * lateral, Math.atan2(t.x, t.z));
+    this.applyRoad(idx);
     this.car.applyVisual(this.model);
   }
 
@@ -188,9 +220,16 @@ export class Race {
     this.offTrack = abs > t.halfWidth + t.curbWidth + 0.2;
   }
 
+  applyRoad(index) {
+    const c = this.car;
+    this.track.roadAt(c.x, c.z, index, this.road);
+    c.y = this.road.y; c.gx = this.road.gx; c.gz = this.road.gz;
+  }
+
   collide() {
     const c = this.car, t = this.track;
     const { index } = t.findNearest(c.x, c.z, this.progress, 30);
+    this.applyRoad(index);
     const lat = t.lateral(c.x, c.z, index);
     const r = t.rights[index];
     const hw = this.spec.maxHalfWidth * 0.95;
@@ -253,7 +292,9 @@ export class Race {
   finish() {
     this.state = 'finished';
     let coins = 400 + 150 * this.totalLaps + 250 * this.cleanLaps + (this.detector.total === 0 ? 500 : 0);
+    coins = Math.round(coins * (this.trackDef.reward || 1) / 10) * 10;
     if (Profile.vip) coins *= 2;
+    const record = this.bestLap > 0 && Profile.recordLap(this.trackDef.id, this.bestLap);
     this.coins = coins;
     Profile.addCoins(coins);
     const d = this.detector;
@@ -261,11 +302,12 @@ export class Race {
     const html = `
       <div class="total">${formatTime(this.raceTime + this.penalty)}</div>
       ${this.penalty > 0 ? `<div style="color:#c99bff">（含罰時 +${this.penalty.toFixed(1)} 秒）</div>` : ''}
-      <div>最佳單圈　${formatTime(this.bestLap)}</div>
+      <div>最佳單圈　${formatTime(this.bestLap)}${record ? '　<b style="color:#ffd24d">賽道新紀錄！</b>' : ''}</div>
+      <div class="dim" style="font-size:13px">${this.trackDef.name}　·　賽道紀錄 ${formatTime(Profile.bestLap(this.trackDef.id))}</div>
       <div class="dim" style="font-size:13px">${this.lapTimes.map((t, i) => `第 ${i + 1} 圈 ${formatTime(t)}`).join('　')}</div>
       <div style="margin-top:6px"><b>失誤統計：共 ${d.total} 次</b></div>
       <div style="font-size:13px">${mis || '<span style="color:#3ee07f">零失誤，完美駕駛！</span>'}</div>
-      <div class="reward"><span class="coin"></span>獲得金幣 +${coins.toLocaleString()}${Profile.vip ? '（VIP ×2）' : ''}</div>
+      <div class="reward"><span class="coin"></span>獲得金幣 +${coins.toLocaleString()}${this.trackDef.reward > 1 ? `（山路 ×${this.trackDef.reward}）` : ''}${Profile.vip ? '（VIP ×2）' : ''}</div>
       <div class="dim" style="font-size:13px">無失誤圈 ${this.cleanLaps} / ${this.totalLaps}　·　目前金幣 ${Profile.coins.toLocaleString()}</div>`;
     this.hooks.onFinish(html);
   }
@@ -281,13 +323,14 @@ export class Race {
     let dx = fx, dz = fz;
     if (sp > 3 && c.forwardSpeed > 0) { dx = fx * 0.75 + c.vx / sp * 0.25; dz = fz * 0.75 + c.vz / sp * 0.25; const l = Math.hypot(dx, dz); dx /= l; dz /= l; }
     let target, look;
+    const y = c.y, gF = c.gx * fx + c.gz * fz;
     if (mode === 2) {
-      target = new THREE.Vector3(c.x + fx * 0.3, 1.12, c.z + fz * 0.3);
-      look = new THREE.Vector3(c.x + fx * 20, 0.9, c.z + fz * 20);
+      target = new THREE.Vector3(c.x + fx * 0.3, y + 1.12 + gF * 0.3, c.z + fz * 0.3);
+      look = new THREE.Vector3(c.x + fx * 20, y + 0.9 + gF * 20, c.z + fz * 20);
     } else {
       const dist = mode === 0 ? 6.2 : 9.5, height = mode === 0 ? 2.0 : 3.1;
-      target = new THREE.Vector3(c.x - dx * dist, height, c.z - dz * dist);
-      look = new THREE.Vector3(c.x + fx * 3, 0.9, c.z + fz * 3);
+      target = new THREE.Vector3(c.x - dx * dist, y + height - gF * dist * 0.6, c.z - dz * dist);
+      look = new THREE.Vector3(c.x + fx * 3, y + 0.9 + gF * 3, c.z + fz * 3);
     }
     if (snap || mode === 2) { this.camPos.copy(target); this.camLook.copy(look); }
     else {
@@ -296,6 +339,11 @@ export class Race {
       this.camLook.lerp(look, 1 - Math.exp(-dt * 12));
     }
     cam.position.copy(this.camPos);
+    if (this.track.mountain && mode !== 2) {
+      // 別讓鏡頭鑽進山壁
+      const g = this.track.groundAt(cam.position.x, cam.position.z) + 1.0;
+      if (cam.position.y < g) { cam.position.y = g; this.camPos.y = g; }
+    }
     if (this.shake > 0) {
       this.shake = Math.max(0, this.shake - dt * 2.5);
       const s = this.shake * 0.25;
@@ -305,8 +353,9 @@ export class Race {
     const fov = (mode === 2 ? 66 : 58) + Math.min(1, sp / this.spec.maxSpeed) * 14;
     if (Math.abs(cam.fov - fov) > 0.05) { cam.fov += (fov - cam.fov) * Math.min(1, dt * 3); cam.updateProjectionMatrix(); }
     // 陰影跟著車
-    this.sun.target.position.set(c.x, 0, c.z);
-    this.sun.position.set(c.x + this.sunOffset.x, this.sunOffset.y, c.z + this.sunOffset.z);
+    this.sun.target.position.set(c.x, c.y, c.z);
+    this.sun.position.set(c.x + this.sunOffset.x, c.y + this.sunOffset.y, c.z + this.sunOffset.z);
+    if (this.stars) this.stars.position.set(cam.position.x, 0, cam.position.z);
   }
 
   dispose() {

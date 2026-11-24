@@ -23,9 +23,10 @@ function ensure() {
   def('selected', 'aurora');
   def('paints', {});
   def('settings', {});
+  def('best', {});
   const s = state.settings;
   const d = { vibration: true, vibrationStrength: 1, voice: true, voiceVolume: 1, visual: true,
-    assist: 2, steerMode: 'buttons', autoThrottle: false, camera: 0, quality: 'auto', laps: 3 };
+    assist: 2, steerMode: 'buttons', autoThrottle: false, camera: 0, quality: 'auto', laps: 3, track: 'circuit' };
   for (const k in d) if (s[k] === undefined) s[k] = d[k];
 }
 ensure();
@@ -51,6 +52,9 @@ export const Profile = {
   grantVip() { state.vip = true; save(); },
   reset() { state = {}; ensure(); save(); },
   selectedCar() { return getCar(state.selected); },
+  bestLap(trackId) { const b = state.best[trackId]; return b === undefined ? -1 : b; },
+  /** 回傳是否刷新紀錄 */
+  recordLap(trackId, t) { const b = this.bestLap(trackId); if (b < 0 || t < b) { state.best[trackId] = t; save(); return true; } return false; },
   ownedCount() { return CARS.filter((c) => this.owns(c.id)).length; },
 };
 

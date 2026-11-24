@@ -25,7 +25,8 @@ export class CarPhysics {
 
     // 輪胎 / 轉向參數（沿用 Unity 版調校）
     this.frontPeak = 8; this.rearPeak = 7;
-    this.rearGripBias = 1.12;
+    this.rearGripBias = spec.rearGripBias ?? 1.12;
+    this.driveFront = spec.driveFront ?? 0.5; // 0 = 後驅、0.5 = 四驅
     this.frontSlide = 0.85; this.rearSlide = 0.9;
     this.handbrakeRearGrip = 0.35;
     this.offTrackGripMul = 0.8; this.offTrackDrag = 60;
@@ -39,6 +40,7 @@ export class CarPhysics {
 
   reset(x, z, heading) {
     this.x = x; this.z = z; this.h = heading;
+    this.y = 0; this.gx = 0; this.gz = 0; // 路面高度與坡度（dy/dx, dy/dz）
     this.vx = 0; this.vz = 0; this.r = 0;
     this.steerInput = 0; this.steerAngle = 0;
     this.ax = 0; this.aLat = 0; this.aLong = 0;
@@ -128,7 +130,7 @@ export class CarPhysics {
       const latCancel = Math.abs(vLat) * mAxle / dt;
       lat = Math.max(-latCancel, Math.min(latCancel, lat));
 
-      let lon = drive * 0.5;
+      let lon = drive * (drive > 0 ? (front ? this.driveFront : 1 - this.driveFront) : 0.5);
       lon -= vLong * (this.offTrack ? this.offTrackDrag : 9) * 2;
       const hb = !front && handbrake && enabled;
       if (brakeAll || hb) {
@@ -147,6 +149,9 @@ export class CarPhysics {
     // 空氣阻力
     Fx -= this.vx * speed * 0.6;
     Fz -= this.vz * speed * 0.6;
+    // 坡道：重力沿坡面的分量
+    Fx -= m * G * this.gx;
+    Fz -= m * G * this.gz;
 
     const ax = Fx / m, az = Fz / m;
     this.vx += ax * dt;
@@ -212,8 +217,9 @@ export class CarPhysics {
 
   /** 把物理狀態套用到車輛模型 */
   applyVisual(model, alpha = 1) {
-    model.root.position.set(this.x, 0, this.z);
-    model.root.rotation.set(0, this.h, 0);
+    model.root.position.set(this.x, this.y, this.z);
+    const gradeF = this.gx * this.fx + this.gz * this.fz;
+    model.root.rotation.set(-Math.atan(gradeF), this.h, 0, 'YXZ');
     model.body.rotation.x = Math.max(-0.05, Math.min(0.05, -this.aLong * 0.0045));
     model.body.rotation.z = Math.max(-0.06, Math.min(0.06, -this.aLat * 0.005));
     const steerRad = -this.steerAngle * Math.PI / 180;
