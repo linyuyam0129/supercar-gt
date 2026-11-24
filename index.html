@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0c10">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>極速超跑 GT</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+    } }
+  </script>
+</head>
+<body>
+  <canvas id="view"></canvas>
+
+  <!-- 載入中 -->
+  <div id="loading" class="layer show">
+    <div class="logo">極速超跑 <b>GT</b></div>
+    <div class="bar"><i id="loadBar"></i></div>
+    <div id="loadText">載入中…</div>
+  </div>
+
+  <!-- 直式提示 -->
+  <div id="rotate" class="layer">
+    <div class="phone"></div>
+    <p>請將手機轉為橫向遊玩</p>
+  </div>
+
+  <!-- 車庫 -->
+  <div id="garage" class="layer">
+    <header class="topbar">
+      <div class="title">車庫<small>GARAGE</small></div>
+      <div class="spacer"></div>
+      <div class="coins"><span class="coin"></span><b id="gCoins">0</b></div>
+      <div id="gVip" class="vip hidden">VIP</div>
+      <button class="iconbtn nav" id="gShopBtn" title="商店">🛒<span>商店</span></button>
+      <button class="iconbtn nav" id="gSetBtn" title="設定">⚙<span>設定</span></button>
+      <button class="iconbtn" id="gFullBtn" title="全螢幕">⛶</button>
+    </header>
+    <section class="info">
+      <div class="page" id="gPage">1 / 5</div>
+      <h1 id="gName">Aurora GT</h1>
+      <div class="sub" id="gSub"></div>
+      <p class="desc" id="gDesc"></p>
+      <div class="stats" id="gStats"></div>
+    </section>
+    <button class="arrow left nav" id="gPrev" aria-label="上一台">‹</button>
+    <button class="arrow right nav" id="gNext" aria-label="下一台">›</button>
+    <footer class="gfoot">
+      <div class="paints">
+        <div class="paintName" id="gPaintName"></div>
+        <div class="swatches" id="gSwatches"></div>
+      </div>
+      <div class="spacer"></div>
+      <div class="actionBox">
+        <div class="price" id="gPrice"></div>
+        <button class="primary nav" id="gAction">開始比賽</button>
+      </div>
+    </footer>
+    <div class="hint pad-only">LB/RB 換車　十字鍵 ↑↓ 換色　A 確認　Y 商店　Start 設定</div>
+  </div>
+
+  <!-- 比賽 HUD -->
+  <div id="hud" class="layer">
+    <div class="panel tl">
+      <div id="hLap">圈數 1/3</div>
+      <div id="hTime" class="big">00:00.000</div>
+      <div id="hBest" class="dim">最佳 --:--.---</div>
+      <div id="hPen" class="pen"></div>
+      <div id="hMis" class="dim"></div>
+    </div>
+    <div class="tr">
+      <div class="chips">
+        <button class="chip" id="cVib">震動</button>
+        <button class="chip" id="cVoice">語音</button>
+        <button class="chip" id="cVis">畫面</button>
+      </div>
+      <div class="trbtns">
+        <button class="iconbtn" id="hCam" title="切換視角"><span>視角</span></button>
+        <button class="iconbtn" id="hReset" title="重置車輛">↺</button>
+        <button class="iconbtn" id="hPause" title="暫停">❚❚</button>
+      </div>
+    </div>
+    <div id="lights" class="startlights"><i></i><i></i><i></i><i></i><i></i></div>
+    <div id="countdown" class="countdown"></div>
+    <div id="alert" class="alert"><div class="abar"></div><div><b id="aTitle"></b><span id="aDetail"></span></div></div>
+    <div id="edgeL" class="edge l"></div><div id="edgeR" class="edge r"></div>
+    <div id="toast" class="toast"></div>
+    <div class="speedo">
+      <div><b id="hSpeed">0</b><small>km/h</small></div>
+      <div class="sbar"><i id="hSpeedBar"></i></div>
+    </div>
+    <!-- 觸控操作 -->
+    <div id="touch" class="touch">
+      <div id="steerBtns" class="steer">
+        <button id="tLeft" class="tbtn">◀</button>
+        <button id="tRight" class="tbtn">▶</button>
+      </div>
+      <div id="dragArea" class="dragArea"><div id="dragKnob" class="knob"></div><span>左右滑動轉向</span></div>
+      <div id="tiltInfo" class="tiltInfo">重力感應轉向中</div>
+      <div class="pedals">
+        <button id="tHand" class="tbtn small">手煞車</button>
+        <button id="tBrake" class="tbtn brake">煞車</button>
+        <button id="tGas" class="tbtn gas">油門</button>
+      </div>
+    </div>
+    <div class="hint pad-only kb-hint" id="hHint"></div>
+  </div>
+
+  <!-- 完賽 -->
+  <div id="finish" class="layer modal">
+    <div class="card">
+      <h2>完賽！</h2>
+      <div id="fBody"></div>
+      <div class="row">
+        <button class="secondary nav" id="fGarage">返回車庫</button>
+        <button class="primary nav" id="fAgain">再跑一次</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 設定 / 暫停選單 -->
+  <div id="menu" class="layer modal">
+    <div class="card wide">
+      <h2 id="mTitle">設定</h2>
+      <div class="list" id="mList"></div>
+      <div class="foot dim">點選項目切換 · 控制器：↑↓ 選擇　←→ 調整　A 確認　B 返回</div>
+    </div>
+  </div>
+
+  <!-- 商店 -->
+  <div id="shop" class="layer modal">
+    <div class="card wide">
+      <h2>課金商店</h2>
+      <div class="sub">目前金幣 <span class="coin"></span><b id="sCoins">0</b></div>
+      <div class="testmode">⚠ 測試模式：購買不會實際扣款，僅用於展示課金流程</div>
+      <div class="list" id="sList"></div>
+      <div class="row"><button class="secondary nav" id="sClose">關閉</button></div>
+    </div>
+  </div>
+
+  <!-- 確認對話框 -->
+  <div id="dialog" class="layer modal top">
+    <div class="card">
+      <div id="dText"></div>
+      <div class="row">
+        <button class="secondary nav" id="dNo">取消</button>
+        <button class="primary nav" id="dYes">確認</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="gToast" class="toast global"></div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
