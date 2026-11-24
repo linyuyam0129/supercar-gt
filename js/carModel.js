@@ -156,10 +156,20 @@ export const trackHalf = (s, front) => {
 };
 
 // ---------------- 車身 ----------------
-const bulgeAt = (s, z) => gauss(z - s.frontAxleZ, 0.5) * s.fenderBulgeFront + gauss(z - s.rearAxleZ, 0.55) * s.fenderBulgeRear;
+/** 葉子板隆起高度：至少要高過輪胎頂端，低矮車身才不會讓輪拱吃掉葉子板 */
+function fenderBulge(s, front) {
+  const key = front ? '_bf' : '_br';
+  if (s[key] === undefined) {
+    const az = front ? s.frontAxleZ : s.rearAxleZ;
+    const need = 2 * s.wheelRadius + 0.1 - smooth(s.bodyZ, s.bodyTop, az);
+    s[key] = Math.max(front ? s.fenderBulgeFront : s.fenderBulgeRear, need);
+  }
+  return s[key];
+}
+const bulgeAt = (s, z) => gauss(z - s.frontAxleZ, 0.5) * fenderBulge(s, true) + gauss(z - s.rearAxleZ, 0.55) * fenderBulge(s, false);
 /** 輪拱半徑：不能高過該處引擎蓋 / 葉子板，否則會在上方開洞 */
 function archR(s, az) {
-  const top = smooth(s.bodyZ, s.bodyTop, az) + (az > 0 ? s.fenderBulgeFront : s.fenderBulgeRear) * 0.5;
+  const top = smooth(s.bodyZ, s.bodyTop, az) + fenderBulge(s, az > 0) * 0.5;
   return Math.max(s.wheelRadius + 0.02, Math.min(s.wheelRadius + 0.05, top - 0.05 - s.wheelRadius));
 }
 /** 輪拱：把落在輪拱圓內的車身側面頂點推到圓周上（上半圓）或兩側（下半），得到平滑的輪拱邊緣 */
@@ -191,49 +201,86 @@ function inArch(s, c) {
   }
   return false;
 }
-function bodyRing(s, z, m) {
+/** 車身斷面上的一點。t 為斷面角度；腰線（最寬處）高度由 shoulder 決定，上半部可內收（tumblehome）、下半部微收 */
+function sectionPt(s, z, t) {
   const hw = smooth(s.bodyZ, s.bodyHalfWidth, z);
   const yb = smooth(s.bodyZ, s.bodyBottom, z), yt = smooth(s.bodyZ, s.bodyTop, z);
-  const yc = (yb + yt) / 2, h = (yt - yb) / 2, e = 2 / s.bodyRoundness;
-  const bulge = bulgeAt(s, z);
+  const ysh = yb + (yt - yb) * (s.shoulder ?? 0.5);
+  const st = Math.sin(t), ct = Math.cos(t), up = st >= 0;
+  const e = 2 / (up ? s.bodyRoundness : (s.bodyRoundnessLow ?? s.bodyRoundness));
+  let x = hw * spow(ct, e);
+  let y = up ? ysh + (yt - ysh) * spow(st, e) : ysh + (ysh - yb) * spow(st, e);
+  if (up) { const ku = clamp01((y - ysh) / Math.max(1e-3, yt - ysh)); x *= lerp(1, s.bodyTaper, ku * ku); }
+  else { const kl = clamp01((ysh - y) / Math.max(1e-3, ysh - yb)); x *= lerp(1, s.bodyTuck ?? 0.96, kl * kl); }
+  const xr = Math.abs(x) / hw;
+  if (up) y += bulgeAt(s, z) * sstep(0.4, 0.85, xr) * clamp01((y - ysh) / Math.max(1e-3, yt - ysh) * 1.5);
+  return { x, y, xr, st, ysh };
+}
+function bodyRing(s, z, m) {
   const ring = [];
   for (let j = 0; j < m; j++) {
-    const t = -Math.PI / 2 + j / m * Math.PI * 2;
-    let x = hw * spow(Math.cos(t), e);
-    let y = yc + h * spow(Math.sin(t), e);
-    const k = clamp01((y - yb) / (yt - yb));
-    x *= lerp(1, s.bodyTaper, k * k);
-    const xr = Math.abs(x) / hw;
-    if (y > yc) y += bulge * sstep(0.35, 0.8, xr) * clamp01((y - yc) / h * 1.5);
-    ring.push(carveArch(s, [x, y, z], xr, Math.sin(t)));
+    const p = sectionPt(s, z, -Math.PI / 2 + j / m * Math.PI * 2);
+    ring.push(carveArch(s, [p.x, p.y, z], p.xr, p.st));
   }
   return ring;
 }
 function bodyRingRaw(s, z, m) { // 不含輪拱，用來量測車身表面
-  const hw = smooth(s.bodyZ, s.bodyHalfWidth, z);
-  const yb = smooth(s.bodyZ, s.bodyBottom, z), yt = smooth(s.bodyZ, s.bodyTop, z);
-  const yc = (yb + yt) / 2, h = (yt - yb) / 2, e = 2 / s.bodyRoundness;
-  const bulge = bulgeAt(s, z);
   const ring = [];
-  for (let j = 0; j < m; j++) {
-    const t = -Math.PI / 2 + j / m * Math.PI * 2;
-    let x = hw * spow(Math.cos(t), e);
-    let y = yc + h * spow(Math.sin(t), e);
-    const k = clamp01((y - yb) / (yt - yb));
-    x *= lerp(1, s.bodyTaper, k * k);
-    if (y > yc) y += bulge * sstep(0.35, 0.8, Math.abs(x) / hw) * clamp01((y - yc) / h * 1.5);
-    ring.push([x, y, z]);
-  }
+  for (let j = 0; j < m; j++) { const p = sectionPt(s, z, -Math.PI / 2 + j / m * Math.PI * 2); ring.push([p.x, p.y, z]); }
   return ring;
 }
 function buildBody(s) {
   const rings = [];
   for (let i = 0; i < BODY_RINGS; i++) rings.push(bodyRing(s, lerp(s.rearZ, s.frontZ, i / (BODY_RINGS - 1)), BODY_VERTS));
-  return loft(rings, true, true, 2, (c, n) => {
+  return loft(rings, true, true, 3, (c, n) => {
+    if (archMembrane(s, c)) return 2;           // 被輪拱切開後橫跨開口的三角形：丟掉
     if (n.y < -0.35 && c.y < 0.45) return 1;   // 底盤
-    if (inArch(s, c)) return 1;                 // 輪拱內壁
+    if (n.y < 0.5 && inArch(s, c)) return 1;    // 輪拱內壁（朝上的葉子板頂面不算）
     return 0;
   });
+}
+/** 面中心明顯落在輪拱開口內（不在輪拱圓周上）→ 是跨越開口的薄膜 */
+function archMembrane(s, c) {
+  const cy = s.wheelRadius;
+  for (const az of [s.frontAxleZ, s.rearAxleZ]) {
+    const ra = archR(s, az) - 0.004;
+    const dz = c.z - az, dy = c.y - cy;
+    const hw = smooth(s.bodyZ, s.bodyHalfWidth, az);
+    if (Math.abs(c.x) < hw * 0.5) continue;
+    if (dy >= 0 ? dz * dz + dy * dy < ra * ra : Math.abs(dz) < ra) return true;
+  }
+  return false;
+}
+/** 輪拱內襯：上半圓弧 + 前後兩片直立擋板 */
+function buildWells(s) {
+  const out = [];
+  for (const az of [s.frontAxleZ, s.rearAxleZ]) {
+    const ra = archR(s, az) + 0.004, R = s.wheelRadius;
+    const hw = smooth(s.bodyZ, s.bodyHalfWidth, az);
+    const yb = smooth(s.bodyZ, s.bodyBottom, az);
+    const front = az === s.frontAxleZ;
+    const tw = front ? s.frontTireWidth : s.rearTireWidth;
+    const x0 = Math.min(hw * 0.7, trackHalf(s, front) - tw / 2 - 0.02), x1 = hw - 0.004, w = x1 - x0;
+    const capY = topY(s, az, x0) - 0.03; // 內襯不可高過該處車身表面
+    for (const side of [-1, 1]) {
+      const arc = new THREE.CylinderGeometry(ra, ra, w, 28, 1, true, 0, Math.PI);
+      arc.rotateZ(Math.PI / 2);
+      arc.translate(side * (x0 + w / 2), R, az);
+      out.push(arc);
+      for (const dz of [-ra, ra]) {
+        const h = R - yb + 0.02;
+        const g = new THREE.PlaneGeometry(w, h);
+        g.translate(side * (x0 + w / 2), yb - 0.01 + h / 2, az + dz);
+        out.push(g);
+      }
+      const bt = Math.min(R + ra, capY);
+      const back = new THREE.PlaneGeometry(ra * 2, bt - yb);
+      back.rotateY(Math.PI / 2);
+      back.translate(side * x0, (bt + yb) / 2, az);
+      out.push(back);
+    }
+  }
+  return mergeGeometries(out.map((g) => g.toNonIndexed()));
 }
 const bodyTopC = (s, z) => smooth(s.bodyZ, s.bodyTop, z);
 function cabinPoint(s, z, t) {
@@ -268,7 +315,7 @@ function glassPatch(s, zA, zB, tA, tB, nz = 28, nt = 18) {
   const rc = Math.min(0.1, (zB - zA) * 0.3);
   for (let i = 0; i <= nz; i++) {
     const z = lerp(zA, zB, i / nz);
-    const u = Math.min(z - zA, zB - z) / rc;
+    const u = Math.max(0, Math.min(z - zA, zB - z) / rc); // 浮點誤差可能讓 u 略小於 0 → sqrt 負數
     const shrink = u < 1 ? 0.14 * (1 - Math.sqrt(1 - (1 - u) * (1 - u))) : 0;
     const a = tA + shrink, b = Math.max(a, tB - shrink);
     for (let j = 0; j <= nt; j++) {
@@ -316,7 +363,7 @@ function buildGlass(s) {
 }
 function topY(s, z, xAbs) {
   const ring = bodyRingRaw(s, z, 96);
-  const yc = (smooth(s.bodyZ, s.bodyBottom, z) + smooth(s.bodyZ, s.bodyTop, z)) / 2;
+  const yb0 = smooth(s.bodyZ, s.bodyBottom, z), yc = yb0 + (smooth(s.bodyZ, s.bodyTop, z) - yb0) * (s.shoulder ?? 0.5);
   let best = smooth(s.bodyZ, s.bodyTop, z), bd = 1e9;
   for (const p of ring) {
     if (p[1] < yc || p[0] < 0) continue;
@@ -350,10 +397,134 @@ function materials(s, paint) {
     rim: new THREE.MeshStandardMaterial({ color: col(s.rimColor), roughness: 0.25, metalness: 0.95 }),
     disc: new THREE.MeshStandardMaterial({ color: col([0.42, 0.42, 0.43]), roughness: 0.45, metalness: 0.9 }),
     caliper: new THREE.MeshStandardMaterial({ color: col(s.caliperColor), roughness: 0.4, metalness: 0.2 }),
+    well: new THREE.MeshStandardMaterial({ color: col([0.02, 0.02, 0.022]), roughness: 0.9, side: THREE.DoubleSide }),
+    carbonRoof: new THREE.MeshPhysicalMaterial({ color: col([0.02, 0.02, 0.022]), roughness: 0.25, metalness: 0.4, clearcoat: 1, clearcoatRoughness: 0.03 }),
+    trimGloss: new THREE.MeshPhysicalMaterial({ color: col([0.01, 0.01, 0.012]), roughness: 0.15, metalness: 0.3, clearcoat: 1 }),
     amber: new THREE.MeshStandardMaterial({ color: col([0.9, 0.45, 0.05]), emissive: new THREE.Color(0.5, 0.2, 0), roughness: 0.2 }),
   };
 }
 
+
+// ---------------- 著色器貼花（燈組、進氣口、碳纖維件）----------------
+// 每個貼花是投影在某個平面上的圓角矩形（可斜切），用物件座標計算，邊緣俐落不受網格影響。
+// plane：0 側面 (z,y)、1 上方 (z,|x|)、2 前後 (|x|,y)；kind：0 碳纖維 1 亮黑 2 深色玻璃 3 頭燈 4 尾燈 5 強調色 6 格柵
+const PLANES = { side: 0, top: 1, end: 2 };
+const KINDS = { carbon: 0, black: 1, glass: 2, head: 3, tail: 4, accent: 5, vent: 6 };
+function decalMaterial(base, s, decals) {
+  const m = base.clone();
+  if (!decals.length) decals = [{ plane: 'side', kind: 'black', u: [0, 0], v: [0, 0], range: [99, 99] }]; // 佔位（GLSL 陣列不可為空）
+  const N = decals.length;
+  const A = [], B = [], C = [];
+  for (const d of decals) {
+    const pl = PLANES[d.plane];
+    const [u0, u1] = d.u, [v0, v1] = d.v;
+    A.push(new THREE.Vector4((u0 + u1) / 2, (v0 + v1) / 2, Math.abs(u1 - u0) / 2, Math.abs(v1 - v0) / 2));
+    B.push(new THREE.Vector4(d.skew || 0, Math.min(d.r ?? 0.02, Math.abs(u1 - u0) / 2, Math.abs(v1 - v0) / 2), d.range ? d.range[0] : -99, d.range ? d.range[1] : 99));
+    C.push(new THREE.Vector4(pl, KINDS[d.kind], 0, 0));
+  }
+  const uni = {
+    uDA: { value: A }, uDB: { value: B }, uDC: { value: C }, uBrake: { value: 0 },
+    uAccent: { value: col(s.accent || [0.6, 0.6, 0.62]) },
+    uLower: { value: col(s.twoTone || [0, 0, 0]) }, uCut: { value: s.twoTone ? s.twoToneY : -99 },
+  };
+  m.userData.uni = uni;
+  m.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, uni);
+    sh.vertexShader = 'varying vec3 vLocal;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvLocal = position;');
+    const head = `#define DECALS ${Math.max(1, N)}
+varying vec3 vLocal;
+uniform vec4 uDA[DECALS]; uniform vec4 uDB[DECALS]; uniform vec4 uDC[DECALS];
+uniform float uBrake; uniform vec3 uAccent; uniform vec3 uLower; uniform float uCut;
+`;
+    const body = `
+float decalAmt = 0.0; float decalR = roughness; float decalM = metalness; vec3 decalE = vec3(0.0);
+{
+  // 雙色車身
+  float tt = smoothstep(uCut - 0.003, uCut + 0.003, vLocal.y);
+  diffuseColor.rgb = mix(uLower, diffuseColor.rgb, tt);
+  if (uCut > -50.0) { float pin = 1.0 - smoothstep(0.004, 0.008, abs(vLocal.y - uCut - 0.012)); diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.5, 0.5, 0.52), pin * 0.6); }
+  vec3 p = vec3(abs(vLocal.x), vLocal.y, vLocal.z);
+  for (int i = 0; i < ${N}; i++) {
+    vec4 a = uDA[i]; vec4 b = uDB[i]; vec4 c = uDC[i];
+    vec2 q; float rng;
+    if (c.x < 0.5) { q = p.zy; rng = p.x; } else if (c.x < 1.5) { q = p.zx; rng = p.y; } else { q = p.xy; rng = p.z; }
+    q -= a.xy;
+    q.y -= b.x * q.x;
+    vec2 e = abs(q) - a.zw + b.y;
+    float sd = length(max(e, 0.0)) + min(max(e.x, e.y), 0.0) - b.y;
+    float aa = fwidth(sd) + 1e-4;
+    float m = (1.0 - smoothstep(-aa, aa, sd)) * step(b.z, rng) * step(rng, b.w);
+    if (m <= 0.0) continue;
+    int k = int(c.y + 0.5);
+    vec3 cc = vec3(0.0); float rr = 0.5; float mm = 0.0; vec3 ee = vec3(0.0);
+    if (k == 0) { float tw = step(0.5, fract((vLocal.z + vLocal.y - vLocal.x) * 55.0)) * 0.5 + step(0.5, fract((vLocal.z - vLocal.y + vLocal.x) * 55.0)) * 0.5; cc = vec3(0.016, 0.016, 0.018) * (0.7 + 0.6 * tw); rr = 0.3; mm = 0.35; }
+    else if (k == 1) { cc = vec3(0.005); rr = 0.12; mm = 0.3; }
+    else if (k == 2) { cc = vec3(0.003, 0.004, 0.006); rr = 0.05; mm = 0.7; }
+    else if (k == 3) { cc = vec3(0.9, 0.92, 1.0); rr = 0.1; ee = vec3(3.2, 3.3, 3.7); }
+    else if (k == 4) { cc = vec3(0.45, 0.01, 0.01); rr = 0.15; ee = vec3(1.1, 0.03, 0.02) * (1.0 + uBrake * 4.5); }
+    else if (k == 5) { cc = uAccent; rr = 0.3; mm = 0.5; }
+    else { float sl = step(0.5, fract(q.x * 30.0)); cc = vec3(0.003) + vec3(0.025) * sl; rr = 0.55; mm = 0.2; }
+    diffuseColor.rgb = mix(diffuseColor.rgb, cc, m);
+    decalR = mix(decalR, rr, m); decalM = mix(decalM, mm, m); decalE = mix(decalE, ee, m);
+    decalAmt = max(decalAmt, m);
+  }
+}
+`;
+    sh.fragmentShader = head + sh.fragmentShader
+      .replace('#include <color_fragment>', '#include <color_fragment>' + body)
+      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = mix(roughnessFactor, decalR, decalAmt);')
+      .replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\nmetalnessFactor = mix(metalnessFactor, decalM, decalAmt);')
+      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += decalE;');
+  };
+  m.customProgramCacheKey = () => 'decal' + N;
+  return m;
+}
+
+/** 依車身尺寸自動產生超跑貼花（各車可用 s.look 微調） */
+function hyperDecals(s) {
+  const L = s.look || {};
+  const fz = s.frontZ, rz = s.rearZ;
+  const hwAt = (z) => smooth(s.bodyZ, s.bodyHalfWidth, z);
+  const yb = (z) => smooth(s.bodyZ, s.bodyBottom, z), yt = (z) => smooth(s.bodyZ, s.bodyTop, z);
+  const d = [];
+  // 碳纖維側裙
+  d.push({ plane: 'side', kind: 'carbon', u: [rz + 0.15, fz - 0.15], v: [-1, yb(0) + (L.sill ?? 0.11)], r: 0.01, range: [0.5, 9] });
+  // 前保桿：中央格柵與兩側大進氣口
+  const nb = yb(fz - 0.05), nt = yt(fz - 0.05), nh = nt - nb, nw = hwAt(fz - 0.05);
+  d.push({ plane: 'end', kind: 'carbon', u: [-nw, nw], v: [nb - 0.2, nb + 0.04], r: 0.01, range: [fz - 0.45, 99] }); // 下擾流
+  if (L.grille === 'horseshoe') {
+    d.push({ plane: 'end', kind: 'vent', u: [-0.2, 0.2], v: [nb + 0.05, nt + 0.02], r: 0.12, range: [fz - 0.4, 99] });
+    d.push({ plane: 'end', kind: 'vent', u: [nw * 0.45, nw * 0.9], v: [nb + 0.05, nb + nh * 0.62], r: 0.05, skew: 0.15, range: [fz - 0.4, 99] });
+  } else {
+    d.push({ plane: 'end', kind: 'vent', u: [-nw * 0.42, nw * 0.42], v: [nb + 0.05, nb + nh * (L.grilleH ?? 0.5)], r: 0.04, range: [fz - 0.4, 99] });
+    d.push({ plane: 'end', kind: 'vent', u: [nw * 0.5, nw * 0.92], v: [nb + 0.05, nb + nh * 0.7], r: 0.05, skew: 0.25, range: [fz - 0.4, 99] });
+  }
+  // 頭燈：斜切的深色燈殼 + LED 光條
+  const hz = fz - (L.headBack ?? 0.36), hx = hwAt(hz) * (L.headX ?? 0.72);
+  const hs = L.headSkew ?? 0.45, hl = L.headLen ?? 0.2, hwid = L.headW ?? 0.1;
+  d.push({ plane: 'top', kind: 'glass', u: [hz - hl, hz + hl], v: [hx - hwid, hx + hwid], r: 0.04, skew: hs, range: [0.15, 9] });
+  d.push({ plane: 'top', kind: 'head', u: [hz - hl * 0.85, hz + hl * 0.85], v: [hx + hwid * 0.45, hx + hwid * 0.75], r: 0.01, skew: hs, range: [0.15, 9] });
+  if (L.quad !== false) for (const k of [-0.45, 0.1]) d.push({ plane: 'top', kind: 'head', u: [hz + hl * k - 0.04, hz + hl * k + 0.04], v: [hx - hwid * 0.6, hx + hwid * 0.25], r: 0.03, skew: hs, range: [0.15, 9] });
+  // 側面進氣口
+  if (L.sideIntake !== false) {
+    const z0 = L.intakeZ ? L.intakeZ[0] : s.rearAxleZ + 0.45, z1 = L.intakeZ ? L.intakeZ[1] : s.rearAxleZ + 1.25;
+    const y0 = yb(z1) + 0.16, y1 = (yb(z1) + yt(z1)) / 2 + 0.12;
+    d.push({ plane: 'side', kind: 'vent', u: [z0, z1], v: [y0, y1], r: 0.08, skew: L.intakeSkew ?? -0.22, range: [0.7, 9] });
+  }
+  // 引擎蓋通風口、引擎蓋板百葉
+  if (L.hoodVents !== false) d.push({ plane: 'top', kind: 'vent', u: [fz - 1.05, fz - 0.72], v: [0.1, 0.36], r: 0.05, range: [0.2, 9] });
+  if (L.louvers !== false) d.push({ plane: 'top', kind: 'vent', u: [rz + 0.35, rz + 0.95], v: [0.15, 0.55], r: 0.04, range: [0.3, 9] });
+  if (L.accentStripe) d.push({ plane: 'top', kind: 'accent', u: [rz - 1, fz + 1], v: [0, 0.08], r: 0, range: [0.3, 9] });
+  // 車尾：黑色面板、整條 LED 尾燈、擴散器
+  const rb = yb(rz + 0.05), rt = yt(rz + 0.05), rw = hwAt(rz + 0.05);
+  d.push({ plane: 'end', kind: 'carbon', u: [-rw, rw], v: [rb - 0.3, rb + (L.diffuserH ?? 0.2)], r: 0.03, range: [-99, rz + 0.5] });
+  d.push({ plane: 'end', kind: 'black', u: [-rw * 0.95, rw * 0.95], v: [rt - 0.24, rt - 0.06], r: 0.05, range: [-99, rz + 0.14] });
+  if (L.tail === 'split') for (const k of [0.25, 0.75]) d.push({ plane: 'end', kind: 'tail', u: [rw * k - 0.22, rw * k + 0.22], v: [rt - 0.17, rt - 0.12], r: 0.02, range: [-99, rz + 0.15] });
+  else if (L.tail === 'ring') for (const k of [0.35, 0.72]) d.push({ plane: 'end', kind: 'tail', u: [rw * k - 0.09, rw * k + 0.09], v: [rt - 0.2, rt - 0.1], r: 0.05, range: [-99, rz + 0.15] });
+  else d.push({ plane: 'end', kind: 'tail', u: [-rw * 0.9, rw * 0.9], v: [rt - 0.16, rt - 0.125], r: 0.015, range: [-99, rz + 0.15] });
+  if (L.extra) d.push(...L.extra);
+  return d;
+}
 // ---------------- 組裝 ----------------
 export function buildCar(s, paint, { shadows = true } = {}) {
   const M = materials(s, paint);
@@ -364,29 +535,23 @@ export function buildCar(s, paint, { shadows = true } = {}) {
   const col_ = new Collector();
 
   const [bPaint, bTrim] = buildBody(s);
-  // 雙色車身：用著色器依高度切換顏色，分界線才會俐落（不受網格三角形影響）
+  const hyper = s.style === 'hyper';
+  // 車身烤漆 + 著色器貼花（雙色、燈組、進氣口），分界線俐落不受網格三角形影響
   let bodyPaint = M.paint;
-  if (s.twoTone) {
-    bodyPaint = M.paint.clone();
-    const lower = { value: col(s.twoTone) }, cut = { value: s.twoToneY };
-    bodyPaint.onBeforeCompile = (sh) => {
-      sh.uniforms.uLower = lower; sh.uniforms.uCut = cut;
-      sh.vertexShader = 'varying float vLocalY;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvLocalY = position.y;');
-      sh.fragmentShader = 'uniform vec3 uLower;\nuniform float uCut;\nvarying float vLocalY;\n' + sh.fragmentShader.replace('#include <color_fragment>',
-        '#include <color_fragment>\nfloat tt = smoothstep(uCut - 0.003, uCut + 0.003, vLocalY);\ndiffuseColor.rgb = mix(uLower, diffuseColor.rgb, tt);\nfloat pin = 1.0 - smoothstep(0.004, 0.008, abs(vLocalY - uCut - 0.012));\ndiffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.5, 0.5, 0.52), pin * 0.6);');
-    };
-    bodyPaint.customProgramCacheKey = () => 'twoTone';
+  if (hyper || s.twoTone) {
+    bodyPaint = decalMaterial(M.paint, s, hyper ? hyperDecals(s) : []);
     M.body = bodyPaint;
   }
   col_.add(body, bPaint, bodyPaint); col_.add(body, bTrim, M.trim);
-  col_.add(body, buildCabin(s), M.paint);
+  col_.add(body, buildWells(s), M.well);
+  col_.add(body, buildCabin(s), s.roof === 'carbon' ? M.carbonRoof : s.roof === 'black' ? M.trimGloss : M.paint);
   for (const g of buildGlass(s)) col_.add(body, g, M.glass);
 
   const P = (type, pos, scale, mat, rot, group = body) => col_.add(group, UNIT[type], mat, trs(pos, scale, rot));
   const fz = s.frontZ, rz = s.rearZ;
 
-  // 頭燈
-  for (const side of [-1, 1]) {
+  // 頭燈（超跑款式改用貼花）
+  for (const side of hyper ? [] : [-1, 1]) {
     if (s.headLights === 'popup') {
       // 掀起式頭燈（升起狀態）
       const z = fz - 0.46;
@@ -421,8 +586,11 @@ export function buildCar(s, paint, { shadows = true } = {}) {
     P('cube', [0, yf + 0.25, fz - 0.02], [hf * 0.9, 0.04, 0.06], M.trim);
     for (const side of [-1, 1]) P('cube', [side * hf * 0.7, yf + 0.12, zf + 0.165], [0.2, 0.06, 0.01], M.amber);
   }
-  // 前保桿進氣 / 下擾流
-  if (!s.retro) {
+  // 前保桿進氣 / 下擾流（超跑只留碳纖維下擾流板）
+  if (hyper) {
+    const sz = fz - 0.2;
+    P('cube', [0, smooth(s.bodyZ, s.bodyBottom, sz) - 0.012, sz + 0.06], [smooth(s.bodyZ, s.bodyHalfWidth, sz) * 1.9, 0.022, 0.4], M.carbon);
+  } else if (!s.retro) {
     const z = fz - 0.08;
     const hw = smooth(s.bodyZ, s.bodyHalfWidth, z), yb = smooth(s.bodyZ, s.bodyBottom, z);
     P('sphere', [0, yb + 0.1, z], [hw * 1.1, 0.13, 0.16], M.trim);
@@ -432,7 +600,7 @@ export function buildCar(s, paint, { shadows = true } = {}) {
     P('cube', [0, smooth(s.bodyZ, s.bodyBottom, sz) - 0.005, sz], [smooth(s.bodyZ, s.bodyHalfWidth, sz) * 1.85, 0.025, 0.34], M.carbon);
   }
   // 側進氣口
-  if (s.sideIntake) {
+  if (s.sideIntake && !hyper) {
     const z = s.sideIntakeZ;
     const y = lerp(smooth(s.bodyZ, s.bodyBottom, z), smooth(s.bodyZ, s.bodyTop, z), 0.5);
     const x = sideX(s, z, y);
@@ -462,7 +630,7 @@ export function buildCar(s, paint, { shadows = true } = {}) {
     const hw = smooth(s.bodyZ, s.bodyHalfWidth, rz);
     const y = yt - 0.11;
     const axisZ = [90, 0, 0];
-    for (const side of [-1, 1]) {
+    for (const side of hyper ? [] : [-1, 1]) {
       if (s.tailLights === 'roundDouble') {
         for (const fx of [0.36, 0.62]) {
           P('cyl', [side * hw * fx, y, rz - 0.005], [0.18, 0.02, 0.18], M.trim, axisZ);
@@ -475,7 +643,7 @@ export function buildCar(s, paint, { shadows = true } = {}) {
         P('sphere', [side * hw * 0.42, y, rz + 0.01], [hw * 0.62, 0.06, 0.06], M.tail);
       }
     }
-    if (s.tailLights === 'bar') P('cube', [0, y, rz + 0.005], [hw * 0.5, 0.012, 0.02], M.tail);
+    if (s.tailLights === 'bar' && !hyper) P('cube', [0, y, rz + 0.005], [hw * 0.5, 0.012, 0.02], M.tail);
     if (s.tailLights === 'band') {
       // 橫貫車尾的寬版尾燈
       P('cube', [0, y - 0.03, rz - 0.004], [hw * 1.76, 0.15, 0.03], M.trim);
@@ -490,7 +658,7 @@ export function buildCar(s, paint, { shadows = true } = {}) {
       for (let f = -2; f <= 2; f++) P('cube', [f * dw * 0.18, dyb + 0.06, dz - 0.03], [0.018, 0.1, 0.4], M.carbon);
     }
     const ey = s.retro ? yb - 0.03 : yb + 0.08;
-    const xs = s.exhaustCount >= 4 ? [-0.42, -0.28, 0.28, 0.42] : s.exhaustCount === 1 ? [-0.55] : [-0.3, 0.3];
+    const xs = s.exhaustCount === 0 ? [] : s.exhaustCount >= 4 ? [-0.42, -0.28, 0.28, 0.42] : s.exhaustCount === 1 ? [-0.55] : s.exhaustCount === 3 ? [-0.14, 0, 0.14] : [-0.3, 0.3];
     for (const ex of xs) {
       P('cyl', [ex * hw, ey, rz - 0.03], [0.1, 0.07, 0.1], M.chrome, axisZ);
       P('cyl', [ex * hw, ey, rz - 0.075], [0.075, 0.03, 0.075], M.trim, axisZ);
@@ -538,31 +706,33 @@ export function buildCar(s, paint, { shadows = true } = {}) {
     root.add(pivot);
     pivots.push(pivot); spinners.push(spinner);
 
+    // 超跑：大尺寸輪圈 + 低扁平比輪胎
+    const rk = hyper ? 1.12 : 1, ti = hyper ? 0.79 : 0.7;
     col_.add(spinner, lathe([
-      [-hw + 0.012, 0.70 * R], [-hw, 0.78 * R], [-hw - 0.004, 0.88 * R], [-hw + 0.006, 0.955 * R], [-hw + 0.03, 0.993 * R], [-hw + 0.06, R],
-      [hw - 0.06, R], [hw - 0.03, 0.993 * R], [hw - 0.006, 0.955 * R], [hw + 0.004, 0.88 * R], [hw, 0.78 * R], [hw - 0.012, 0.70 * R],
-    ], 36), M.tire);
+      [-hw + 0.012, ti * R], [-hw, (ti + 0.06) * R], [-hw - 0.004, 0.9 * R], [-hw + 0.006, 0.96 * R], [-hw + 0.03, 0.993 * R], [-hw + 0.06, R],
+      [hw - 0.06, R], [hw - 0.03, 0.993 * R], [hw - 0.006, 0.96 * R], [hw + 0.004, 0.9 * R], [hw, (ti + 0.06) * R], [hw - 0.012, ti * R],
+    ], 40), M.tire);
     const fx = side * (hw - 0.03);
-    col_.add(spinner, lathe([[-hw + 0.02, 0.66 * R], [hw - 0.02, 0.66 * R], [hw - 0.02, 0.71 * R], [-hw + 0.02, 0.71 * R], [-hw + 0.02, 0.66 * R]], 28), M.rim);
-    col_.add(spinner, lathe([[fx - side * 0.015, 0.6 * R], [fx + side * 0.005, 0.62 * R], [fx + side * 0.005, 0.72 * R], [fx - side * 0.015, 0.73 * R], [fx - side * 0.015, 0.6 * R]], 36), M.rim);
+    col_.add(spinner, lathe([[-hw + 0.02, 0.66 * rk * R], [hw - 0.02, 0.66 * rk * R], [hw - 0.02, 0.71 * rk * R], [-hw + 0.02, 0.71 * rk * R], [-hw + 0.02, 0.66 * rk * R]], 32), M.rim);
+    col_.add(spinner, lathe([[fx - side * 0.015, 0.6 * rk * R], [fx + side * 0.005, 0.62 * rk * R], [fx + side * 0.005, 0.72 * rk * R], [fx - side * 0.015, 0.73 * rk * R], [fx - side * 0.015, 0.6 * rk * R]], 40), M.rim);
 
     let count, width;
-    if (s.rims === 'tenSpoke') { count = 10; width = 0.045; } else if (s.rims === 'wire') { count = 28; width = 0.008; } else { count = 10; width = 0.05; }
+    if (s.rims === 'tenSpoke') { count = 10; width = 0.045; } else if (s.rims === 'wire') { count = 28; width = 0.008; } else if (s.rims === 'twinSpoke') { count = 14; width = 0.026; } else if (s.rims === 'aero') { count = 20; width = 0.05; } else { count = 10; width = 0.05; }
     for (let k = 0; k < count; k++) {
-      const a = s.rims === 'fiveSpoke' ? Math.floor(k / 2) * 72 + (k % 2 === 0 ? -7 : 7) : k * 360 / count;
-      const rad = a * D2R, rMid = 0.37 * R;
+      const a = s.rims === 'fiveSpoke' ? Math.floor(k / 2) * 72 + (k % 2 === 0 ? -7 : 7) : s.rims === 'twinSpoke' ? Math.floor(k / 2) * 360 / 7 + (k % 2 === 0 ? -5 : 5) : k * 360 / count;
+      const rad = a * D2R, rMid = 0.37 * rk * R;
       const tiltA = s.rims === 'wire' ? (k % 2 === 0 ? 12 : -12) : 0;
       const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), rad)
         .multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, side * 6 * D2R)))
         .multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(tiltA * D2R, 0, 0)));
       // 注意：Three.js 繞 X 軸正向旋轉把 +Y 轉向 +Z，與 (cos, sin) 擺放一致
-      P('cube', [fx - side * 0.012, Math.cos(rad) * rMid, Math.sin(rad) * rMid], [0.028, 0.5 * R, width], M.rim, q, spinner);
+      P('cube', [fx - side * 0.012, Math.cos(rad) * rMid, Math.sin(rad) * rMid], [0.028, 0.5 * rk * R, width], M.rim, q, spinner);
     }
     const axisX = [0, 0, 90];
     P('cyl', [fx - side * 0.01, 0, 0], [0.26 * R, 0.03, 0.26 * R], M.rim, axisX, spinner);
     P('cyl', [fx + side * 0.004, 0, 0], [0.12 * R, 0.01, 0.12 * R], M.disc, axisX, spinner);
-    P('cyl', [-side * 0.02, 0, 0], [1.18 * R, 0.014, 1.18 * R], M.disc, axisX, spinner);
-    P('cube', [side * 0.005, 0.38 * R, (front ? -1 : 1) * 0.26 * R], [0.07, 0.24 * R, 0.42 * R], M.caliper, [(front ? 1 : -1) * 35, 0, 0], pivot);
+    P('cyl', [-side * 0.02, 0, 0], [1.18 * rk * R, 0.014, 1.18 * rk * R], M.disc, axisX, spinner);
+    P('cube', [side * 0.005, 0.38 * rk * R, (front ? -1 : 1) * 0.26 * rk * R], [0.07, 0.24 * R, 0.42 * R], M.caliper, [(front ? 1 : -1) * 35, 0, 0], pivot);
   }
 
   col_.build(shadows);
@@ -571,7 +741,10 @@ export function buildCar(s, paint, { shadows = true } = {}) {
     root, body, pivots, spinners, anchors,
     brake: M.tail, paint: M.paint,
     setPaint(c) { M.paint.color.copy(col(c)); if (M.body) M.body.color.copy(M.paint.color); },
-    setBrake(on) { M.tail.emissive.setRGB(on ? 6 : 0.9, on ? 0.12 : 0.02, on ? 0.1 : 0.02); },
+    setBrake(on) {
+      M.tail.emissive.setRGB(on ? 6 : 0.9, on ? 0.12 : 0.02, on ? 0.1 : 0.02);
+      if (M.body && M.body.userData.uni) M.body.userData.uni.uBrake.value = on ? 1 : 0;
+    },
     dispose() {
       root.traverse((o) => { if (o.isMesh) o.geometry.dispose(); });
       Object.values(M).forEach((m) => m.dispose());

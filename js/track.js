@@ -208,7 +208,10 @@ export class Track {
     const colors = new Float32Array(pos.count * 3);
     const sample = [];
     for (let i = 0; i < this.count; i += 4) sample.push(this.points[i]);
-    const grass = new THREE.Color(0.16, 0.30, 0.09), dry = new THREE.Color(0.40, 0.38, 0.20), rock = new THREE.Color(0.42, 0.41, 0.38);
+    const desert = this.def.time === 'desert';
+    const grass = desert ? new THREE.Color(0.74, 0.58, 0.38) : new THREE.Color(0.16, 0.30, 0.09);
+    const dry = desert ? new THREE.Color(0.64, 0.45, 0.27) : new THREE.Color(0.40, 0.38, 0.20);
+    const rock = desert ? new THREE.Color(0.56, 0.34, 0.21) : new THREE.Color(0.42, 0.41, 0.38);
     const tmp = new THREE.Color();
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i) + c.x, z = pos.getZ(i) + c.z;
@@ -473,6 +476,13 @@ export class Track {
     }
     this.meanY = sum / this.hfSamples.length;
     this.minY = Math.min(...this.points.map((p) => p.y));
+    if (this.def.sea) {
+      const [dx, dz] = this.def.sea.dir, l = Math.hypot(dx, dz);
+      const sd = { dx: dx / l, dz: dz / l };
+      sd.edge = Math.max(...this.points.map((p) => p.x * sd.dx + p.z * sd.dz)) - 20;
+      sd.level = this.minY - 24;
+      this.sea = sd;
+    }
   }
   /** 回傳 { d: 與路中心距離, y: 最近路面高度, base: 平滑後的周邊高度, i: 最近點 } */
   roadInfo(x, z) {
@@ -512,8 +522,13 @@ export class Track {
     const rough = sstep(hw + 4, hw + 70, d);
     const ridge = 1 - Math.abs(vnoise(x * 0.0025 + 40, z * 0.0025 + 8) * 2 - 1); // 山脊
     const h = info.base + rough * ((n1 - 0.45) * 40 + (n2 - 0.5) * 6) + sstep(220, 1100, d) * (n1 * 150 + ridge * 120 - 20);
+    let hh = h;
+    if (this.sea) {
+      const s = x * this.sea.dx + z * this.sea.dz - this.sea.edge;
+      hh = lerp(h, this.sea.level - 45, sstep(-25, 140, s));
+    }
     const blend = sstep(hw + 2.6, hw + 15, d);
-    return lerp(info.y - 0.3, h, blend);
+    return lerp(info.y - 0.3, hh, blend);
   }
 
   buildMountainTerrain() {
@@ -548,16 +563,24 @@ export class Track {
     geo.setIndex(idx);
     geo.computeVertexNormals();
     const nrm = geo.getAttribute('normal');
-    const autumn = this.def.time === 'autumn';
-    const grass = autumn ? new THREE.Color(0.30, 0.22, 0.08) : new THREE.Color(0.11, 0.22, 0.07);
-    const forest = autumn ? new THREE.Color(0.34, 0.12, 0.04) : new THREE.Color(0.06, 0.15, 0.05);
-    const rock = new THREE.Color(0.33, 0.31, 0.28), snow = new THREE.Color(0.8, 0.82, 0.85);
+    const th = this.def.time;
+    const pal = {
+      autumn: [[0.30, 0.22, 0.08], [0.34, 0.12, 0.04], [0.33, 0.31, 0.28]],
+      dusk: [[0.17, 0.23, 0.09], [0.08, 0.15, 0.06], [0.46, 0.39, 0.31]],
+      snow: [[0.88, 0.90, 0.94], [0.66, 0.71, 0.76], [0.27, 0.27, 0.29]],
+    }[th] || [[0.11, 0.22, 0.07], [0.06, 0.15, 0.05], [0.33, 0.31, 0.28]];
+    const grass = new THREE.Color(...pal[0]), forest = new THREE.Color(...pal[1]), rock = new THREE.Color(...pal[2]);
+    const snow = new THREE.Color(0.8, 0.82, 0.85), sand = new THREE.Color(0.66, 0.58, 0.42);
+    const snowLine = th === 'snow' ? -1e9 : 230;
     const tmp = new THREE.Color();
     for (let v = 0; v < nx * nz; v++) {
       const x = pos[v * 3], y = pos[v * 3 + 1], z = pos[v * 3 + 2];
       const steep = sstep(0.72, 0.5, nrm.getY(v));
       const n = vnoise(x * 0.008 + 50, z * 0.008 + 50);
-      tmp.copy(grass).lerp(forest, sstep(0.35, 0.7, n)).lerp(rock, steep).lerp(snow, sstep(230, 300, y - this.minY) * (1 - steep * 0.6));
+      tmp.copy(grass).lerp(forest, sstep(0.35, 0.7, n)).lerp(rock, steep);
+      if (th !== 'snow') tmp.lerp(snow, sstep(snowLine, snowLine + 70, y - this.minY) * (1 - steep * 0.6));
+      else tmp.lerp(grass, sstep(0.9, 0.97, nrm.getY(v)) * 0.7); // 平緩處積雪較厚
+      if (this.sea) tmp.lerp(sand, sstep(this.sea.level + 7, this.sea.level + 1, y));
       const s = 0.85 + hash(x, z) * 0.2;
       colors[v * 3] = tmp.r * s; colors[v * 3 + 1] = tmp.g * s; colors[v * 3 + 2] = tmp.b * s;
     }
@@ -566,7 +589,23 @@ export class Track {
       const v = 150 + (fbm(x * 0.03, y * 0.03, 3) - 0.5) * 120 + (vnoise(x * 0.9, y * 0.12) - 0.5) * 50 + (hash(x, y) - 0.5) * 50;
       return [v, v, v];
     }), { srgb: false });
-    this.mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, map: detail, roughness: 0.95 }));
+    this.mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, map: detail, roughness: th === 'snow' ? 0.8 : 0.95 }));
+    if (this.sea) this.buildSea();
+  }
+
+  /** 海面：大平面 + 細微波紋法線 */
+  buildSea() {
+    const nm = canvasTex(256, 256, (ctx, w, h) => noiseFill(ctx, w, h, (x, y) => {
+      const a = fbm(x * 0.06, y * 0.11, 3), b = fbm(x * 0.06 + 9, y * 0.11 + 4, 3);
+      return [128 + (a - 0.5) * 120, 128 + (b - 0.5) * 120, 255];
+    }), { srgb: false });
+    nm.repeat.set(220, 220);
+    const mat = new THREE.MeshStandardMaterial({ color: 0x123a50, roughness: 0.12, metalness: 0.2, normalMap: nm, normalScale: new THREE.Vector2(0.35, 0.35) });
+    const c = this.bounds.getCenter(new THREE.Vector3());
+    const g = new THREE.PlaneGeometry(7000, 7000).rotateX(-Math.PI / 2);
+    g.translate(c.x, this.sea.level, c.z);
+    this.mesh(g, mat);
+    this.seaNormal = nm;
   }
 
   buildMountainRoad() {
@@ -588,7 +627,7 @@ export class Track {
     this.mesh(this.strip((i) => this.edge(i, -hw), (i) => this.edge(i, hw), 0, 1, 1 / 12, 0.02), roadMat);
     const dirt = canvasTex(256, 256, (ctx, w, h) => noiseFill(ctx, w, h, (x, y) => {
       const v = 110 + (hash(x, y) - 0.5) * 80 + (vnoise(x * 0.2, y * 0.2) - 0.5) * 40;
-      return [v * 0.8, v * 0.74, v * 0.62];
+      return this.def.time === 'snow' ? [v * 1.7, v * 1.75, v * 1.85] : [v * 0.8, v * 0.74, v * 0.62];
     }));
     const dirtMat = new THREE.MeshStandardMaterial({ map: dirt, roughness: 1 });
     this.mesh(this.strip((i) => this.edge(i, -(this.leftBarrier[i] + 0.6)), (i) => this.edge(i, -hw), 0, 2, 1 / 4, 0.0), dirtMat);
@@ -723,8 +762,11 @@ export class Track {
 
     const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3524, roughness: 0.95 });
     const pineMat = new THREE.MeshStandardMaterial({ color: 0x173d1c, roughness: 0.9, flatShading: true });
-    const autumn = this.def.time === 'autumn';
+    const autumn = this.def.time === 'autumn', snowy = this.def.time === 'snow', desert = this.def.time === 'desert';
+    if (snowy) pineMat.color.set(0xffffff);
+    const frost = [0x9fb2ab, 0xc9d6d2, 0x6d8579, 0xe4ecea].map((c) => new THREE.Color(c));
     const leafMat = new THREE.MeshStandardMaterial({ color: autumn ? 0xffffff : 0x2f5a1c, roughness: 0.9, flatShading: true });
+    if (desert) return this.buildCacti();
     const fall = [0xc0301a, 0xd8641a, 0xe0a020, 0x9a2a14, 0x5a6a1c].map((c) => new THREE.Color(c));
 
     const spots = [];
@@ -742,7 +784,7 @@ export class Track {
         if (info.d < minClear || rnd() > 0.35 + vnoise(x * 0.012 + 7, z * 0.012 + 3) * 0.9) continue;
         const y = this.terrainH(x, z);
         if (y - this.minY > 200) continue;
-        spots.push({ x, y: y - 0.3, z, s: 0.8 + rnd() * 0.7, rot: rnd() * Math.PI * 2, pine: rnd() < (this.def.time === 'autumn' ? 0.35 : 0.75) });
+        spots.push({ x, y: y - 0.3, z, s: 0.8 + rnd() * 0.7, rot: rnd() * Math.PI * 2, pine: rnd() < (autumn ? 0.35 : snowy ? 0.97 : 0.75) });
         continue;
       }
       if ((x - start.x) ** 2 + (z - start.z) ** 2 < 140 * 140) continue;
@@ -761,6 +803,7 @@ export class Track {
       list.forEach((t, i) => {
         q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), t.rot); m.compose(new THREE.Vector3(t.x, t.y, t.z), q, new THREE.Vector3(t.s, t.s, t.s)); im.setMatrixAt(i, m);
         if (autumn && mat === leafMat) im.setColorAt(i, fall[Math.floor(hash(t.x, t.z) * fall.length)]);
+        if (snowy && mat === pineMat) im.setColorAt(i, frost[Math.floor(hash(t.x, t.z) * frost.length)]);
       });
       im.count = list.length;
       im.castShadow = this.quality !== 'low';
@@ -769,6 +812,45 @@ export class Track {
     mk(trunkGeo, trunkMat, spots);
     mk(pineGeo, pineMat, spots.filter((t) => t.pine));
     mk(leafGeo, leafMat, spots.filter((t) => !t.pine));
+  }
+
+  /** 沙漠：仙人掌與岩塊 */
+  buildCacti() {
+    const parts = [];
+    const add = (r, h, x, y, z, rz = 0) => { const g = new THREE.CylinderGeometry(r * 0.9, r, h, 8); g.translate(0, h / 2, 0); if (rz) g.rotateZ(rz); g.translate(x, y, z); parts.push(g); };
+    add(0.42, 5.2, 0, 0, 0);
+    add(0.26, 1.2, 0.35, 2.0, 0, -Math.PI / 2); add(0.26, 1.8, 1.4, 2.0, 0);
+    add(0.24, 1.0, -0.35, 2.8, 0, Math.PI / 2); add(0.24, 1.4, -1.25, 2.8, 0);
+    const cactus = mergeGeometries(parts.map((g) => g.toNonIndexed()));
+    const rockG = new THREE.DodecahedronGeometry(1.4, 0);
+    const cMat = new THREE.MeshStandardMaterial({ color: 0x3f6a32, roughness: 0.8, flatShading: true });
+    const rMat = new THREE.MeshStandardMaterial({ color: 0x9a6a46, roughness: 0.95, flatShading: true });
+    const b = this.bounds, sample = [];
+    for (let i = 0; i < this.count; i += 3) sample.push(this.points[i]);
+    const start = this.points[0];
+    let seed = 7;
+    const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    const cac = [], rocks = [];
+    const target = this.quality === 'low' ? 160 : 320;
+    for (let a = 0; a < 9000 && cac.length + rocks.length < target; a++) {
+      const x = b.min.x - 300 + rnd() * (b.max.x - b.min.x + 600), z = b.min.z - 300 + rnd() * (b.max.z - b.min.z + 600);
+      if ((x - start.x) ** 2 + (z - start.z) ** 2 < 140 * 140) continue;
+      let near = Infinity;
+      for (const p of sample) near = Math.min(near, (p.x - x) ** 2 + (p.z - z) ** 2);
+      if (near < (this.barrierOffset + 10) ** 2) continue;
+      const d = Math.sqrt(near);
+      const hills = fbm(x * 0.0035 + 17, z * 0.0035 + 3, 3) * 0.75 + vnoise(x * 0.011, z * 0.011) * 0.3;
+      const y = sstep(70, 280, d) * (4 + hills * 34) + sstep(650, 1150, d) * (50 + hills * 170) - 0.2;
+      (rnd() < 0.6 ? cac : rocks).push({ x, y, z, s: 0.7 + rnd() * 0.8, rot: rnd() * Math.PI * 2 });
+    }
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0);
+    for (const [geo, mat, list, sy] of [[cactus, cMat, cac, 1], [rockG, rMat, rocks, 0.6]]) {
+      const im = new THREE.InstancedMesh(geo, mat, Math.max(1, list.length));
+      list.forEach((t, i) => { q.setFromAxisAngle(up, t.rot); m.compose(new THREE.Vector3(t.x, t.y, t.z), q, new THREE.Vector3(t.s, t.s * sy, t.s)); im.setMatrixAt(i, m); });
+      im.count = list.length;
+      im.castShadow = this.quality !== 'low';
+      this.group.add(im);
+    }
   }
 
   dispose() {

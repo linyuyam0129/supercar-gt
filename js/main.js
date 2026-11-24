@@ -108,10 +108,10 @@ function refreshGarage() {
   $('gSub').textContent = c.subtitle;
   $('gDesc').textContent = c.description;
   $('gStats').innerHTML =
-    stat('極速', c.topSpeedKmh, 350, `${c.topSpeedKmh} km/h`) +
-    stat('加速', 4.6 - c.zeroTo100, 2.4, `0-100 ${c.zeroTo100.toFixed(1)}s`) +
-    stat('抓地力', c.grip - 1, 0.7, `${c.grip.toFixed(2)} G`) +
-    stat('下壓力', c.downforce, 2.8, c.downforce.toFixed(1));
+    stat('極速', c.topSpeedKmh - 150, 310, `${c.topSpeedKmh} km/h`) +
+    stat('加速', 5 - c.zeroTo100, 3.3, `0-100 ${c.zeroTo100.toFixed(1)}s`) +
+    stat('抓地力', c.grip - 1, 0.75, `${c.grip.toFixed(2)} G`) +
+    stat('下壓力', c.downforce, 3.1, c.downforce.toFixed(1));
   const p = Profile.paintOf(c);
   $('gPaintName').textContent = `烤漆：${PAINT_NAMES[p]}`;
   $('gSwatches').innerHTML = PAINTS.map((col, i) =>
@@ -187,7 +187,7 @@ $('sList').addEventListener('click', (e) => {
 $('sClose').onclick = () => closeModal('shop');
 
 // ---------------- 選擇賽道 ----------------
-const TIME_NAMES = { day: '白天', night: '夜間', autumn: '秋季午後' };
+const TIME_NAMES = { day: '白天', night: '夜間', autumn: '秋季午後', dusk: '黃昏', snow: '雪天', desert: '沙漠正午' };
 const LAPS = [1, 2, 3, 5];
 function openTracks() {
   const c = Profile.selectedCar();

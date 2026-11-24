@@ -30,10 +30,19 @@ export class Race {
     this.quality = quality;
     const scene = this.scene = new THREE.Scene();
     const def = this.trackDef = getTrack(Settings.track);
-    const night = def.time === 'night', autumn = def.time === 'autumn';
+    const night = def.time === 'night';
+    // 各時段/天候：太陽仰角(極角)、方位、天空參數、霧、光色
+    const TH = {
+      day: { pol: 52, az: 140, sky: [3.2, 1.4, 0.004], ground: 0x3a4a2a, fog: [0xb4c4d6, 380, 2600], sun: [0xfff1dc, 2.6], hemi: [0xcfe0ff, 0x4a5a35, 0.5], env: 0.9 },
+      autumn: { pol: 68, az: 215, sky: [6, 2.4, 0.006], ground: 0x5a3a1a, fog: [0xd9c3a3, 260, 2200], sun: [0xffd2a0, 2.5], hemi: [0xcfe0ff, 0x6a4a2a, 0.5], env: 0.9 },
+      dusk: { pol: 83, az: 95, sky: [7, 2.8, 0.008], ground: 0x3a3028, fog: [0xd7a07a, 300, 2400], sun: [0xffa860, 2.3], hemi: [0xffc6a0, 0x40342a, 0.5], env: 0.8 },
+      snow: { pol: 62, az: 160, sky: [12, 0.7, 0.01], ground: 0xc6ccd2, fog: [0xcdd5df, 160, 1500], sun: [0xeef3ff, 1.7], hemi: [0xe4ecff, 0xa8b0b8, 0.85], env: 1.0 },
+      desert: { pol: 34, az: 120, sky: [4.5, 1.0, 0.005], ground: 0x9a7a4a, fog: [0xe6d4ae, 450, 2800], sun: [0xfff0d6, 3.0], hemi: [0xd8e4ff, 0x8a6a40, 0.55], env: 0.9 },
+    };
+    const th = TH[def.time] || TH.day;
 
     // 天空、太陽、霧、環境反射（依賽道時段）
-    const sunDir = new THREE.Vector3().setFromSphericalCoords(1, THREE.MathUtils.degToRad(autumn ? 68 : night ? 40 : 52), THREE.MathUtils.degToRad(autumn ? 215 : 140));
+    const sunDir = new THREE.Vector3().setFromSphericalCoords(1, THREE.MathUtils.degToRad(night ? 40 : th.pol), THREE.MathUtils.degToRad(night ? 140 : th.az));
     const pmrem = new THREE.PMREMGenerator(renderer);
     if (night) {
       scene.background = new THREE.Color(0x05070d);
@@ -53,7 +62,7 @@ export class Race {
       const sky = new Sky();
       sky.scale.setScalar(4000);
       const u = sky.material.uniforms;
-      u.turbidity.value = autumn ? 6 : 3.2; u.rayleigh.value = autumn ? 2.4 : 1.4; u.mieCoefficient.value = autumn ? 0.006 : 0.004; u.mieDirectionalG.value = 0.85;
+      [u.turbidity.value, u.rayleigh.value, u.mieCoefficient.value] = th.sky; u.mieDirectionalG.value = 0.85;
       u.sunPosition.value.copy(sunDir);
       scene.add(sky);
       const envScene = new THREE.Scene();
@@ -61,17 +70,17 @@ export class Race {
       Object.assign(sky2.material.uniforms.sunPosition.value, sunDir);
       for (const k of ['turbidity', 'rayleigh', 'mieCoefficient', 'mieDirectionalG']) sky2.material.uniforms[k].value = u[k].value;
       envScene.add(sky2);
-      const ground = new THREE.Mesh(new THREE.CircleGeometry(900, 16).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: autumn ? 0x5a3a1a : 0x3a4a2a }));
+      const ground = new THREE.Mesh(new THREE.CircleGeometry(900, 16).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: th.ground }));
       ground.position.y = -2;
       envScene.add(ground);
       this.envMap = pmrem.fromScene(envScene, 0.02).texture;
-      scene.environmentIntensity = 0.9;
-      scene.fog = autumn ? new THREE.Fog(0xd9c3a3, 260, 2200) : new THREE.Fog(0xb4c4d6, 380, 2600);
+      scene.environmentIntensity = th.env;
+      scene.fog = new THREE.Fog(...th.fog);
     }
     scene.environment = this.envMap;
     pmrem.dispose();
 
-    const sun = this.sun = new THREE.DirectionalLight(night ? 0x8fa6ff : autumn ? 0xffd2a0 : 0xfff1dc, night ? 0.35 : autumn ? 2.5 : 2.6);
+    const sun = this.sun = new THREE.DirectionalLight(night ? 0x8fa6ff : th.sun[0], night ? 0.35 : th.sun[1]);
     sun.position.copy(sunDir).multiplyScalar(120);
     sun.castShadow = quality !== 'low';
     const ss = quality === 'high' ? 2048 : 1024;
@@ -80,7 +89,16 @@ export class Race {
     sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.03;
     scene.add(sun, sun.target);
     this.sunOffset = sunDir.clone().multiplyScalar(150);
-    scene.add(new THREE.HemisphereLight(night ? 0x34406a : 0xcfe0ff, night ? 0x0a0c10 : autumn ? 0x6a4a2a : 0x4a5a35, night ? 0.25 : 0.5));
+    scene.add(night ? new THREE.HemisphereLight(0x34406a, 0x0a0c10, 0.25) : new THREE.HemisphereLight(...th.hemi));
+    if (def.time === 'snow') {
+      // 飄雪：跟著鏡頭的粒子盒
+      const n = quality === 'low' ? 900 : 2200, sp = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) sp.set([(Math.random() - 0.5) * 80, Math.random() * 40, (Math.random() - 0.5) * 80], i * 3);
+      const sg = new THREE.BufferGeometry(); sg.setAttribute('position', new THREE.BufferAttribute(sp, 3));
+      this.snow = new THREE.Points(sg, new THREE.PointsMaterial({ color: 0xffffff, size: 0.16, transparent: true, opacity: 0.85, depthWrite: false }));
+      this.snow.frustumCulled = false;
+      scene.add(this.snow);
+    }
 
     this.track = new Track(scene, { quality, def });
 
@@ -356,6 +374,17 @@ export class Race {
     this.sun.target.position.set(c.x, c.y, c.z);
     this.sun.position.set(c.x + this.sunOffset.x, c.y + this.sunOffset.y, c.z + this.sunOffset.z);
     if (this.stars) this.stars.position.set(cam.position.x, 0, cam.position.z);
+    if (this.snow) {
+      const a = this.snow.geometry.getAttribute('position'), p = a.array, o = this.snow.position;
+      o.set(cam.position.x, cam.position.y - 15, cam.position.z);
+      const t = performance.now() * 0.001;
+      for (let i = 0; i < p.length; i += 3) {
+        p[i + 1] -= dt * (2.2 + (i % 7) * 0.25);
+        p[i] += Math.sin(t + i) * dt * 0.6;
+        if (p[i + 1] < 0) p[i + 1] += 40;
+      }
+      a.needsUpdate = true;
+    }
   }
 
   dispose() {
